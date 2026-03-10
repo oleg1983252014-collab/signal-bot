@@ -13,7 +13,7 @@ import requests
 import math
 import time
 import os
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 
 # ══════════════════════════════════════════
 #  ТОКЕН
@@ -378,7 +378,7 @@ def generate_signal(pair_name: str, tf: str) -> dict:
 #  ФОРМАТУВАННЯ ПОВІДОМЛЕННЯ
 # ══════════════════════════════════════════
 def format_signal(pair: str, tf: str, d: dict) -> str:
-    now       = datetime.now().strftime("%H:%M:%S")
+    now       = (datetime.now(timezone.utc) + timedelta(hours=2)).strftime("%H:%M:%S")
     conf_bar  = "█" * round(d["conf"]/10) + "░" * (10 - round(d["conf"]/10))
     direction = "🟢 BUY ▲" if d["is_buy"] else "🔴 SELL ▼"
     market    = "🌙 OTC MARKET" if d["is_otc"] else "📈 FOREX MARKET"
