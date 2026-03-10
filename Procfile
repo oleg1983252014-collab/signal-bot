@@ -1,0 +1,1 @@
+worker: python pocket_option_bot.py
