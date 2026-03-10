@@ -710,8 +710,12 @@ def result_kb(pair: str, tf: str):
 # ══════════════════════════════════════════
 @bot.callback_query_handler(func=lambda c: c.data == "back_main_v3")
 def back_main_v3(call):
-    bot.edit_message_text("Оберіть категорію:", call.message.chat.id,
-                          call.message.message_id, parse_mode="Markdown", reply_markup=main_menu_v3())
+    try:
+        bot.edit_message_text("🏠 Головне меню\n\nОберіть категорію:", call.message.chat.id,
+                              call.message.message_id, parse_mode="Markdown", reply_markup=main_menu_v3())
+    except:
+        bot.send_message(call.message.chat.id, "🏠 Головне меню\n\nОберіть категорію:",
+                         parse_mode="Markdown", reply_markup=main_menu_v3())
 
 @bot.callback_query_handler(func=lambda c: c.data == "stats")
 def show_stats(call):
@@ -749,7 +753,13 @@ def handle_result(call):
         s["pairs"][pair]["wins"] += 1
     wr  = round(s["wins"] / s["total"] * 100)
     bot.answer_callback_query(call.id, f"{emoji} | Загальний WR: {wr}%")
-    bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=main_menu_v3())
+    # Надсилаємо нове повідомлення з меню
+    bot.send_message(
+        call.message.chat.id,
+        f"{emoji}\n\n📊 Ваш WR: *{wr}%* ({s['wins']}W / {s['losses']}L)\n\nОберіть наступну дію:",
+        parse_mode="Markdown",
+        reply_markup=main_menu_v3()
+    )
 
 @bot.message_handler(commands=["stats"])
 def cmd_stats(msg):
