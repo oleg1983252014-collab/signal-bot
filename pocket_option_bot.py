@@ -448,6 +448,35 @@ EMA 9:  `{d["ema9"]}` | EMA 21: `{d["ema21"]}` | EMA 50: `{d["ema50"]}`
     return msg.strip()
 
 # ══════════════════════════════════════════
+#  НОВІ КЛАВІАТУРИ v3
+# ══════════════════════════════════════════
+def main_menu_v3():
+    kb = InlineKeyboardMarkup(row_width=2)
+    kb.add(
+        InlineKeyboardButton("📈 FOREX",       callback_data="menu_forex"),
+        InlineKeyboardButton("🌙 OTC",          callback_data="menu_otc"),
+    )
+    kb.add(
+        InlineKeyboardButton("📊 Статистика",  callback_data="stats"),
+        InlineKeyboardButton("🕐 Сесії",        callback_data="sessions"),
+    )
+    kb.add(InlineKeyboardButton("ℹ️ Про бота", callback_data="about"))
+    return kb
+
+def result_kb(pair: str, tf: str):
+    kb = InlineKeyboardMarkup(row_width=2)
+    kb.add(
+        InlineKeyboardButton("✅ Виграш",  callback_data=f"result_win_{pair}_{tf}"),
+        InlineKeyboardButton("❌ Програш", callback_data=f"result_loss_{pair}_{tf}"),
+    )
+    kb.add(
+        InlineKeyboardButton("🔄 Новий сигнал", callback_data=f"tf_{pair}_{tf}"),
+        InlineKeyboardButton("🏠 Меню",          callback_data="back_main_v3"),
+    )
+    return kb
+
+
+# ══════════════════════════════════════════
 #  КЛАВІАТУРИ
 # ══════════════════════════════════════════
 def main_menu_kb():
