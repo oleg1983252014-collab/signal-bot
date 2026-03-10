@@ -378,12 +378,20 @@ def generate_signal(pair_name: str, tf: str) -> dict:
 #  ФОРМАТУВАННЯ ПОВІДОМЛЕННЯ
 # ══════════════════════════════════════════
 def format_signal(pair: str, tf: str, d: dict) -> str:
-    now       = (datetime.now(timezone.utc) + timedelta(hours=2)).strftime("%H:%M:%S")
+    now_dt    = datetime.now(timezone.utc) + timedelta(hours=2)
+    now       = now_dt.strftime("%H:%M:%S")
     conf_bar  = "█" * round(d["conf"]/10) + "░" * (10 - round(d["conf"]/10))
     direction = "🟢 BUY ▲" if d["is_buy"] else "🔴 SELL ▼"
     market    = "🌙 OTC MARKET" if d["is_otc"] else "📈 FOREX MARKET"
     data_src  = "🔴 Live ціни" if d["use_real"] else "⚙️ Розрахункові"
     adx_warn  = "" if d["adx_strong"] else "\n⚠️ _ADX<25 — тренд слабкий, обережно!_"
+
+    # ⏱ Час утримання угоди
+    tf_hold = {"1":(1,2),"3":(3,5),"5":(5,10),"15":(15,20),"30":(30,35),"60":(60,75)}
+    hold_min = tf_hold.get(tf, (5,10))
+    expiry_dt = now_dt + timedelta(minutes=hold_min[0])
+    expiry    = expiry_dt.strftime("%H:%M")
+    hold_txt  = f"{hold_min[0]}–{hold_min[1]} хвилин"
 
     # Голоси індикаторів
     votes_txt = ""
@@ -402,6 +410,8 @@ def format_signal(pair: str, tf: str, d: dict) -> str:
 ━━━━━━━━━━━━━━━━━━━━
 🎯 *СИГНАЛ: {direction}*
 💪 *Сила: {d["signal_strength"]}*
+⏱ *Утримувати: {hold_txt}*
+🕐 *Експірація: {expiry}*
 ━━━━━━━━━━━━━━━━━━━━
 
 📊 *Впевненість: {d["conf"]}%*
@@ -492,12 +502,12 @@ def cmd_start(msg):
         "🟢 *17 Forex* | 🌙 *13 OTC* | ⏱ *6 таймфреймів*\n\n"
         "Оберіть категорію:"
     )
-    bot.send_message(msg.chat.id, text, parse_mode="Markdown", reply_markup=main_menu_kb())
+    bot.send_message(msg.chat.id, text, parse_mode="Markdown", reply_markup=main_menu_v3())
 
 @bot.callback_query_handler(func=lambda c: c.data == "back_main")
 def back_main(call):
     bot.edit_message_text("Оберіть категорію:", call.message.chat.id,
-                          call.message.message_id, parse_mode="Markdown", reply_markup=main_menu_kb())
+                          call.message.message_id, parse_mode="Markdown", reply_markup=main_menu_v3())
 
 @bot.callback_query_handler(func=lambda c: c.data == "menu_forex")
 def menu_forex(call):
@@ -537,7 +547,7 @@ def select_tf(call):
     d   = generate_signal(pair, tf)
     msg = format_signal(pair, tf, d)
     bot.edit_message_text(msg, call.message.chat.id, call.message.message_id,
-                          parse_mode="Markdown", reply_markup=after_signal_kb(pair, tf))
+                          parse_mode="Markdown", reply_markup=result_kb(pair, tf))
 
 @bot.callback_query_handler(func=lambda c: c.data == "about")
 def about(call):
@@ -558,7 +568,7 @@ def about(call):
         "📡 Дані: Yahoo Finance API (реальний час)"
     )
     bot.edit_message_text(text, call.message.chat.id, call.message.message_id,
-                          parse_mode="Markdown", reply_markup=main_menu_kb())
+                          parse_mode="Markdown", reply_markup=main_menu_v3())
 
 # ══════════════════════════════════════════
 #  ЗАПУСК
@@ -570,3 +580,154 @@ if __name__ == "__main__":
     print("║  Запущено! Очікую повідомлень...        ║")
     print("╚══════════════════════════════════════════╝")
     bot.infinity_polling()
+
+# ══════════════════════════════════════════
+#  СТАТИСТИКА v3
+# ══════════════════════════════════════════
+user_stats  = {}
+last_signal = {}
+
+def get_stats(chat_id):
+    if chat_id not in user_stats:
+        user_stats[chat_id] = {"total":0,"wins":0,"losses":0,"pairs":{},"streak":0}
+    return user_stats[chat_id]
+
+def format_stats(chat_id) -> str:
+    s = get_stats(chat_id)
+    total = s["total"]
+    if total == 0:
+        return (
+            "📊 *Ваша статистика*\n\n"
+            "Ще немає записів.\n"
+            "Після кожного сигналу натискайте ✅ або ❌ щоб записати результат!"
+        )
+    wins = s["wins"]; losses = s["losses"]
+    wr   = round(wins / total * 100)
+    bar  = "🟢" * round(wr/10) + "⚪" * (10 - round(wr/10))
+    pairs = s["pairs"]
+    best  = sorted(pairs.items(), key=lambda x: x[1]["wins"]/(x[1]["total"] or 1), reverse=True)[:3]
+    best_txt = "".join(f"  • {n}: {d['wins']}/{d['total']} ({round(d['wins']/(d['total'] or 1)*100)}%)\n" for n,d in best)
+    streak = s.get("streak", 0)
+    streak_txt = (f"🔥 Серія виграшів: {streak}\n" if streak > 1
+                  else f"❄️ Серія програшів: {abs(streak)}\n" if streak < -1 else "")
+    return (
+        f"📊 *Ваша статистика*\n\n"
+        f"Всього угод: `{total}`\n"
+        f"✅ Виграші:  `{wins}`\n"
+        f"❌ Програші: `{losses}`\n\n"
+        f"🏆 *Виграшів: {wr}%*\n{bar}\n\n"
+        f"{streak_txt}"
+        f"🥇 *Кращі пари:*\n{best_txt}"
+    )
+
+def get_session_info() -> str:
+    from datetime import datetime, timezone, timedelta
+    now  = datetime.now(timezone.utc)
+    h    = now.hour
+    ua_h = (now + timedelta(hours=2)).hour
+    sessions = [("🗼 Токіо", 0, 9), ("🏦 Лондон", 7, 16), ("🗽 Нью-Йорк", 13, 22)]
+    active   = [n for n,s,e in sessions if s <= h < e]
+    inactive = [n for n,s,e in sessions if not (s <= h < e)]
+    if 13 <= h < 16:   act, tip = "🔥🔥🔥 МАКСИМАЛЬНА", "Лондон + Нью-Йорк — найкращий час!"
+    elif 7 <= h < 13:  act, tip = "🔥🔥 ВИСОКА",        "Добрі пари: EUR/GBP, EUR/USD"
+    elif 13 <= h < 22: act, tip = "🔥🔥 ВИСОКА",        "Добрі пари: USD/JPY, GBP/USD"
+    elif 0 <= h < 9:   act, tip = "🔥 СЕРЕДНЯ",         "Добрі пари: JPY, AUD, NZD"
+    else:              act, tip = "😴 НИЗЬКА",           "Краще утриматись від торгівлі"
+    return (
+        f"🕐 *Торгові сесії*\n\n"
+        f"Час UA: `{ua_h:02d}:00` | UTC: `{h:02d}:00`\n\n"
+        f"✅ *Активні:* {' | '.join(active) or 'Немає'}\n"
+        f"⚪ *Неактивні:* {' | '.join(inactive) or 'Всі активні'}\n\n"
+        f"📊 *Активність:* {act}\n"
+        f"💡 _{tip}_\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"*Розклад (UTC+2):*\n"
+        f"🗼 Токіо:    02:00–11:00\n"
+        f"🏦 Лондон:   09:00–18:00\n"
+        f"🗽 Нью-Йорк: 15:00–00:00\n"
+        f"🔥 Перетин:  15:00–18:00 ← найкращий час"
+    )
+
+# ══════════════════════════════════════════
+#  НОВІ КЛАВІАТУРИ v3
+# ══════════════════════════════════════════
+def main_menu_v3():
+    kb = InlineKeyboardMarkup(row_width=2)
+    kb.add(
+        InlineKeyboardButton("📈 FOREX",       callback_data="menu_forex"),
+        InlineKeyboardButton("🌙 OTC",          callback_data="menu_otc"),
+    )
+    kb.add(
+        InlineKeyboardButton("📊 Статистика",  callback_data="stats"),
+        InlineKeyboardButton("🕐 Сесії",        callback_data="sessions"),
+    )
+    kb.add(InlineKeyboardButton("ℹ️ Про бота", callback_data="about"))
+    return kb
+
+def result_kb(pair: str, tf: str):
+    kb = InlineKeyboardMarkup(row_width=2)
+    kb.add(
+        InlineKeyboardButton("✅ Виграш",  callback_data=f"result_win_{pair}_{tf}"),
+        InlineKeyboardButton("❌ Програш", callback_data=f"result_loss_{pair}_{tf}"),
+    )
+    kb.add(
+        InlineKeyboardButton("🔄 Новий сигнал", callback_data=f"tf_{pair}_{tf}"),
+        InlineKeyboardButton("🏠 Меню",          callback_data="back_main_v3"),
+    )
+    return kb
+
+# ══════════════════════════════════════════
+#  НОВІ ХЕНДЛЕРИ v3
+# ══════════════════════════════════════════
+@bot.callback_query_handler(func=lambda c: c.data == "back_main_v3")
+def back_main_v3(call):
+    bot.edit_message_text("Оберіть категорію:", call.message.chat.id,
+                          call.message.message_id, parse_mode="Markdown", reply_markup=main_menu_v3())
+
+@bot.callback_query_handler(func=lambda c: c.data == "stats")
+def show_stats(call):
+    text = format_stats(call.message.chat.id)
+    bot.edit_message_text(text, call.message.chat.id, call.message.message_id,
+                          parse_mode="Markdown", reply_markup=main_menu_v3())
+
+@bot.callback_query_handler(func=lambda c: c.data == "sessions")
+def show_sessions(call):
+    text = get_session_info()
+    bot.edit_message_text(text, call.message.chat.id, call.message.message_id,
+                          parse_mode="Markdown", reply_markup=main_menu_v3())
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("result_"))
+def handle_result(call):
+    parts  = call.data.split("_")
+    result = parts[1]        # win або loss
+    tf     = parts[-1]
+    pair   = "_".join(parts[2:-1])
+    chat   = call.message.chat.id
+    s      = get_stats(chat)
+    s["total"] += 1
+    if result == "win":
+        s["wins"]   += 1
+        s["streak"] = max(s.get("streak",0)+1, 1)
+        emoji = "✅ Виграш записано!"
+    else:
+        s["losses"] += 1
+        s["streak"] = min(s.get("streak",0)-1, -1)
+        emoji = "❌ Програш записано"
+    if pair not in s["pairs"]:
+        s["pairs"][pair] = {"total":0,"wins":0}
+    s["pairs"][pair]["total"] += 1
+    if result == "win":
+        s["pairs"][pair]["wins"] += 1
+    wr  = round(s["wins"] / s["total"] * 100)
+    bot.answer_callback_query(call.id, f"{emoji} | Загальний WR: {wr}%")
+    bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=main_menu_v3())
+
+@bot.message_handler(commands=["stats"])
+def cmd_stats(msg):
+    text = format_stats(msg.chat.id)
+    bot.send_message(msg.chat.id, text, parse_mode="Markdown", reply_markup=main_menu_v3())
+
+@bot.message_handler(commands=["sessions"])
+def cmd_sessions(msg):
+    text = get_session_info()
+    bot.send_message(msg.chat.id, text, parse_mode="Markdown", reply_markup=main_menu_v3())
