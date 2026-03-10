@@ -23,6 +23,7 @@ from datetime import datetime
 # ══════════════════════════════════════════
 #  НАЛАШТУВАННЯ — ВСТАВТЕ СВІЙ ТОКЕН
 # ══════════════════════════════════════════
+import os
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 
 bot = telebot.TeleBot(BOT_TOKEN)
