@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import os, math, time, requests
+import os, math, time, requests, threading, json
 from datetime import datetime, timezone, timedelta
 from telebot import TeleBot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
@@ -75,14 +75,132 @@ CRYPTO_TF  = {"5":"5 хвилин","15":"15 хвилин","30":"30 хвилин"
 STOCKS_TF  = {"5":"5 хвилин","15":"15 хвилин","30":"30 хвилин","60":"1 година"}
 
 # ══════════════════════════════════════════
-#  СТАТИСТИКА (зберігається в пам'яті)
+#  СТАТИСТИКА + МАШИННЕ НАВЧАННЯ (Рівень 2)
 # ══════════════════════════════════════════
-user_stats = {}
+user_stats  = {}
+last_signal = {}   # зберігає останній сигнал для ML
+subscribers = {}   # {chat_id: {"active":True, "tf":"5", "min_conf":85, "last_sent":0}}
+scan_pairs  = [p["name"] for p in FOREX_PAIRS[:8]] + [p["name"] for p in CRYPTO_PAIRS[:4]]
+
+# Початкові ваги індикаторів (однакові для всіх)
+DEFAULT_WEIGHTS = {
+    "RSI": 1.0, "MACD": 1.0, "EMA Cross": 1.0,
+    "Ichimoku": 1.0, "Stoch": 1.0, "BB": 1.0,
+    "EMA50": 1.0, "MTF": 1.2, "Обсяг": 0.8, "Патерн": 0.9
+}
 
 def get_stats(cid):
     if cid not in user_stats:
-        user_stats[cid] = {"total":0,"wins":0,"losses":0,"pairs":{},"streak":0}
-    return user_stats[cid]
+        user_stats[cid] = {
+            "total":0,"wins":0,"losses":0,"pairs":{},"streak":0,
+            # ML дані
+            "weights": DEFAULT_WEIGHTS.copy(),   # ваги індикаторів
+            "indicator_stats": {},               # точність кожного індикатора
+            "tf_stats": {},                      # точність по таймфреймах
+            "history": [],                       # останні 500 угод
+            "last_trained": 0,                   # коли останній раз навчались
+        }
+    s = user_stats[cid]
+    # Якщо старий формат — оновити
+    if "weights" not in s:
+        s["weights"] = DEFAULT_WEIGHTS.copy()
+        s["indicator_stats"] = {}
+        s["tf_stats"] = {}
+        s["history"] = []
+        s["last_trained"] = 0
+    return s
+
+def record_trade(cid, pair, tf, votes, conf, result_win):
+    """Зберігає угоду для навчання"""
+    s = get_stats(cid)
+    trade = {
+        "pair": pair, "tf": tf, "conf": conf,
+        "votes": [(v[0], v[1]) for v in votes],
+        "win": result_win,
+        "time": int(time.time())
+    }
+    s["history"].append(trade)
+    if len(s["history"]) > 500:
+        s["history"] = s["history"][-500:]
+
+    # Оновити статистику по індикаторах
+    for name, vote in trade["votes"]:
+        if name not in s["indicator_stats"]:
+            s["indicator_stats"][name] = {"correct":0,"total":0}
+        is_buy_signal = vote == 1
+        if (is_buy_signal and result_win) or (not is_buy_signal and not result_win):
+            s["indicator_stats"][name]["correct"] += 1
+        s["indicator_stats"][name]["total"] += 1
+
+    # Оновити статистику по таймфреймах
+    if tf not in s["tf_stats"]:
+        s["tf_stats"][tf] = {"wins":0,"total":0}
+    s["tf_stats"][tf]["total"] += 1
+    if result_win: s["tf_stats"][tf]["wins"] += 1
+
+    # Автонавчання кожні 20 угод
+    if s["total"] % 20 == 0 and s["total"] >= 20:
+        ml_train(cid)
+
+def ml_train(cid):
+    """Перераховує ваги індикаторів на основі статистики"""
+    s = get_stats(cid)
+    if s["total"] < 20:
+        return
+    new_weights = {}
+    for name, base in DEFAULT_WEIGHTS.items():
+        if name in s["indicator_stats"]:
+            stat = s["indicator_stats"][name]
+            if stat["total"] >= 10:
+                accuracy = stat["correct"] / stat["total"]
+                # Точніший індикатор отримує більшу вагу (0.5 - 2.0)
+                weight = round(max(0.5, min(2.0, base * (accuracy / 0.6))), 2)
+                new_weights[name] = weight
+            else:
+                new_weights[name] = base
+        else:
+            new_weights[name] = base
+    s["weights"] = new_weights
+    s["last_trained"] = int(time.time())
+
+def get_weights(cid):
+    """Повертає навчені ваги для конкретного користувача"""
+    return get_stats(cid).get("weights", DEFAULT_WEIGHTS.copy())
+
+def ml_status_text(cid):
+    """Текст про статус ML навчання"""
+    s = get_stats(cid)
+    total = s["total"]
+    if total < 20:
+        need = 20 - total
+        return f"🤖 *ML навчання:* очікує {need} угод для старту"
+    weights = s.get("weights", DEFAULT_WEIGHTS)
+    trained = s.get("last_trained", 0)
+    trained_str = datetime.fromtimestamp(trained, tz=timezone.utc).strftime("%d.%m %H:%M") if trained else "ще не"
+    # Топ індикатори
+    ind_stats = s.get("indicator_stats", {})
+    top = sorted(
+        [(n, d["correct"]/d["total"]*100) for n,d in ind_stats.items() if d["total"]>=5],
+        key=lambda x: x[1], reverse=True
+    )[:3]
+    top_txt = "\n".join(f"  🏆 {n}: {round(acc)}%" for n,acc in top) if top else "  Ще мало даних"
+    # Найкращий ТФ
+    tf_stats = s.get("tf_stats", {})
+    best_tf = max(tf_stats.items(), key=lambda x: x[1]["wins"]/(x[1]["total"] or 1)) if tf_stats else None
+    tf_txt = f"  ⏱ {best_tf[0]}хв: {round(best_tf[1]['wins']/(best_tf[1]['total'] or 1)*100)}%" if best_tf else "  Ще мало даних"
+    # Ваги що найбільше змінились
+    changed = [(n, w) for n,w in weights.items() if abs(w - DEFAULT_WEIGHTS.get(n,1.0)) > 0.1]
+    changed_txt = "\n".join(f"  {'📈' if w>1 else '📉'} {n}: {w}x" for n,w in changed[:3]) if changed else "  Ваги ще не змінились"
+    return (
+        f"🤖 *ML Навчання — Рівень 2*\n\n"
+        f"📊 Угод для навчання: `{total}`\n"
+        f"🕐 Останнє навчання: `{trained_str}`\n"
+        f"🔄 Наступне: через `{20 - (total % 20)}` угод\n\n"
+        f"🏆 *Найточніші індикатори:*\n{top_txt}\n\n"
+        f"⏱ *Найкращий таймфрейм:*\n{tf_txt}\n\n"
+        f"⚖️ *Адаптовані ваги:*\n{changed_txt}\n\n"
+        f"_Бот вчиться на вашій статистиці автоматично_"
+    )
 
 def stats_text(cid):
     s = get_stats(cid)
@@ -94,9 +212,10 @@ def stats_text(cid):
     bt   = "".join(f"  • {n}: {d['wins']}/{d['total']} ({round(d['wins']/(d['total'] or 1)*100)}%)\n" for n,d in best)
     st   = s.get("streak",0)
     sl   = (f"🔥 Серія виграшів: {st}\n" if st>1 else f"❄️ Серія програшів: {abs(st)}\n" if st<-1 else "")
+    ml   = ml_status_text(cid)
     return (f"📊 *Статистика*\n\nВсього: `{s['total']}`\n✅ Виграші: `{s['wins']}`\n"
             f"❌ Програші: `{s['losses']}`\n\n🏆 *WR: {wr}%*\n{bar}\n\n{sl}"
-            f"🥇 *Кращі пари:*\n{bt}")
+            f"🥇 *Кращі пари:*\n{bt}\n\n━━━━━━━━━━━━━━━━━━━━\n{ml}")
 
 # ══════════════════════════════════════════
 #  ТОРГОВІ СЕСІЇ
@@ -339,7 +458,7 @@ def nearest_sr(price, resistances, supports, decimals):
 # ══════════════════════════════════════════
 #  ГЕНЕРАЦІЯ СИГНАЛУ v3 (MTF + S/R + Patterns + Volume)
 # ══════════════════════════════════════════
-def generate_signal(pair_name, tf):
+def generate_signal(pair_name, tf, cid=None):
     m=ALL_PAIRS.get(pair_name,FOREX_PAIRS[0])
     is_otc="OTC" in pair_name
     closes,highs,lows,volumes=get_candles(m["symbol"],tf,60)
@@ -412,9 +531,13 @@ def generate_signal(pair_name, tf):
     elif pat_score<0: votes.append(("Патерн",-1,pat_desc))
     else:             votes.append(("Патерн",0,pat_desc))
 
+    # ══ ML ВАГИ — застосовуємо навчені ваги ══
+    weights = get_weights(cid) if cid else DEFAULT_WEIGHTS
+    weighted_score = sum(v[1] * weights.get(v[0], 1.0) for v in votes)
     bc=sum(1 for v in votes if v[1]==1)
     sc=sum(1 for v in votes if v[1]==-1)
-    score=bc-sc; is_buy=score>=0
+    # Зважений score замість простого підрахунку
+    score = weighted_score; is_buy = score >= 0
     tv=len(votes)
 
     # ══ ЖОРСТКІ ФІЛЬТРИ ══
@@ -467,7 +590,8 @@ def generate_signal(pair_name, tf):
                 votes=votes,bc=bc,sc=sc,real=real,is_otc=is_otc,
                 nr=nr,ns=ns,sr_warn=sr_warn,pat_desc=pat_desc,
                 mtf_desc=mtf_desc,vol_desc=vol_desc,
-                total_votes=tv,mtf_ok=mtf_ok,pat_ok=pat_ok)
+                total_votes=tv,mtf_ok=mtf_ok,pat_ok=pat_ok,
+                votes_raw=votes,weighted_score=round(weighted_score,2))
 
 def format_signal(pair,tf,d):
     now_dt=datetime.now(timezone.utc)+timedelta(hours=2)
@@ -564,7 +688,7 @@ def format_signal(pair,tf,d):
 # ══════════════════════════════════════════
 #  КЛАВІАТУРИ
 # ══════════════════════════════════════════
-def main_kb():
+def main_kb(cid=None):
     kb=InlineKeyboardMarkup(row_width=2)
     kb.add(InlineKeyboardButton("📈 FOREX",callback_data="menu_forex"),
            InlineKeyboardButton("🌙 OTC",callback_data="menu_otc"))
@@ -572,7 +696,12 @@ def main_kb():
            InlineKeyboardButton("📊 АКЦІЇ",callback_data="menu_stocks"))
     kb.add(InlineKeyboardButton("📊 Статистика",callback_data="stats"),
            InlineKeyboardButton("🕐 Сесії",callback_data="sessions"))
-    kb.add(InlineKeyboardButton("ℹ️ Про бота",callback_data="about"))
+    kb.add(InlineKeyboardButton("🤖 ML Навчання",callback_data="ml_status"),
+           InlineKeyboardButton("ℹ️ Про бота",callback_data="about"))
+    # Авто кнопка — показує статус
+    is_active = subscribers.get(cid,{}).get("active",False) if cid else False
+    auto_label = "🟢 АВТО: ВКЛ" if is_active else "🔴 АВТО: ВИКЛ"
+    kb.add(InlineKeyboardButton(auto_label, callback_data="auto_menu"))
     return kb
 
 def crypto_kb():
@@ -623,9 +752,9 @@ def result_kb(pair,tf):
 def send_main(cid, mid=None):
     txt="⚡ *AI Signal Bot — Pocket Option*\n\nОберіть категорію:"
     if mid:
-        try: bot.edit_message_text(txt,cid,mid,parse_mode="Markdown",reply_markup=main_kb()); return
+        try: bot.edit_message_text(txt,cid,mid,parse_mode="Markdown",reply_markup=main_kb(cid)); return
         except: pass
-    bot.send_message(cid,txt,parse_mode="Markdown",reply_markup=main_kb())
+    bot.send_message(cid,txt,parse_mode="Markdown",reply_markup=main_kb(cid))
 
 @bot.message_handler(commands=["start","menu"])
 def cmd_start(msg):
@@ -670,6 +799,58 @@ def handle_callback(call):
             safe_edit(bot,cid,mid,stats_text(cid),main_kb())
         elif d=="sessions":
             safe_edit(bot,cid,mid,sessions_text(),main_kb())
+        elif d=="ml_status":
+            safe_edit(bot,cid,mid,ml_status_text(cid),main_kb(cid))
+
+        elif d=="auto_menu":
+            if cid not in subscribers:
+                subscribers[cid]={"active":False,"tf":"5","min_conf":85,"last_sent":0}
+            safe_edit(bot,cid,mid,auto_menu_text(cid),sub_settings_kb(cid))
+
+        elif d=="auto_start":
+            if cid not in subscribers:
+                subscribers[cid]={"active":False,"tf":"5","min_conf":85,"last_sent":0}
+            subscribers[cid]["active"]=True
+            subscribers[cid]["last_sent"]=0
+            tf=subscribers[cid].get("tf","5")
+            conf=subscribers[cid].get("min_conf",85)
+            bot.send_message(cid,
+                f"✅ *Автосканування запущено!*\n\n"
+                f"⏱ Таймфрейм: *{tf} хв*\n"
+                f"🎯 Мін. впевненість: *{conf}%*\n"
+                f"📡 Сканую *{len(scan_pairs)}* пар\n\n"
+                f"_Перший сигнал надійде через ~{tf} хв_\n"
+                f"_Тільки сигнали {conf}%+ впевненості_",
+                parse_mode="Markdown",reply_markup=sub_settings_kb(cid))
+
+        elif d=="auto_stop":
+            if cid in subscribers:
+                subscribers[cid]["active"]=False
+            bot.send_message(cid,
+                "⏹ *Автосканування зупинено*\n\n"
+                "Натисніть ▶️ Запустити щоб увімкнути знову",
+                parse_mode="Markdown",reply_markup=main_kb(cid))
+
+        elif d=="auto_tf":
+            # Перемикаємо таймфрейм по колу
+            tfs=["5","15","30","60"]
+            if cid not in subscribers:
+                subscribers[cid]={"active":False,"tf":"5","min_conf":85,"last_sent":0}
+            cur=subscribers[cid].get("tf","5")
+            idx=(tfs.index(cur)+1)%len(tfs) if cur in tfs else 0
+            subscribers[cid]["tf"]=tfs[idx]
+            safe_edit(bot,cid,mid,auto_menu_text(cid),sub_settings_kb(cid))
+
+        elif d=="auto_conf":
+            # Перемикаємо мін. впевненість
+            confs=[75,80,85,90,95]
+            if cid not in subscribers:
+                subscribers[cid]={"active":False,"tf":"5","min_conf":85,"last_sent":0}
+            cur=subscribers[cid].get("min_conf",85)
+            idx=(confs.index(cur)+1)%len(confs) if cur in confs else 2
+            subscribers[cid]["min_conf"]=confs[idx]
+            safe_edit(bot,cid,mid,auto_menu_text(cid),sub_settings_kb(cid))
+
         elif d=="about":
             txt=("ℹ️ *AI Signal Bot v3*\n\n"
                  "• RSI, MACD, EMA 9/21/50\n• Ichimoku Cloud\n• ADX фільтр\n"
@@ -683,29 +864,170 @@ def handle_callback(call):
         elif d.startswith("tf|"):
             _,pair,tf=d.split("|",2)
             bot.edit_message_text(f"⏳ Аналізую *{pair}*...",cid,mid,parse_mode="Markdown")
-            sig=generate_signal(pair,tf)
+            sig=generate_signal(pair,tf,cid=cid)
+            # Зберігаємо останній сигнал для ML
+            if cid not in last_signal: last_signal[cid]={}
+            last_signal[cid]={"pair":pair,"tf":tf,"votes":sig.get("votes_raw",sig["votes"]),"conf":sig["conf"]}
             bot.edit_message_text(format_signal(pair,tf,sig),cid,mid,
                                    parse_mode="Markdown",reply_markup=result_kb(pair,tf))
         elif d.startswith("win|") or d.startswith("loss|"):
             res,pair,tf=d.split("|",2)
             s=get_stats(cid); s["total"]+=1
-            if res=="win":
+            is_win = res=="win"
+            if is_win:
                 s["wins"]+=1; s["streak"]=max(s.get("streak",0)+1,1); emoji="✅ Виграш записано!"
             else:
                 s["losses"]+=1; s["streak"]=min(s.get("streak",0)-1,-1); emoji="❌ Програш записано"
             if pair not in s["pairs"]: s["pairs"][pair]={"total":0,"wins":0}
             s["pairs"][pair]["total"]+=1
-            if res=="win": s["pairs"][pair]["wins"]+=1
+            if is_win: s["pairs"][pair]["wins"]+=1
+            # ML — записати угоду
+            ls = last_signal.get(cid,{})
+            if ls.get("pair")==pair:
+                record_trade(cid, pair, tf, ls.get("votes",[]), ls.get("conf",70), is_win)
             wr=round(s["wins"]/s["total"]*100)
-            bot.send_message(cid,f"{emoji}\n\n📊 WR: *{wr}%* ({s['wins']}W/{s['losses']}L)\n\nОберіть дію:",
+            # Перевірити чи відбулось навчання
+            ml_note=""
+            if s["total"]>0 and s["total"]%20==0:
+                ml_note="\n\n🤖 _ML навчання оновлено! Ваги індикаторів перераховано._"
+            bot.send_message(cid,f"{emoji}\n\n📊 WR: *{wr}%* ({s['wins']}W/{s['losses']}L){ml_note}\n\nОберіть дію:",
                              parse_mode="Markdown",reply_markup=main_kb())
     except Exception as e:
         print(f"Помилка: {e}")
         bot.send_message(cid,"Оберіть категорію:",reply_markup=main_kb())
 
 # ══════════════════════════════════════════
+#  АВТОСКАНУВАННЯ
+# ══════════════════════════════════════════
+
+auto_scan_settings = {}
+auto_scan_threads  = {}
+
+def get_scan_settings(cid):
+    if cid not in auto_scan_settings:
+        auto_scan_settings[cid] = {
+            "active": False, "interval": 5,
+            "min_conf": 85,  "tf": "5", "min_votes": 7,
+        }
+    return auto_scan_settings[cid]
+
+def scan_all_pairs(cid, settings):
+    tf = settings["tf"]
+    min_conf = settings["min_conf"]
+    min_votes = settings["min_votes"]
+    best = []
+    for pair_data in FOREX_PAIRS + OTC_PAIRS:
+        try:
+            sig = generate_signal(pair_data["name"], tf, cid=cid)
+            votes_for = sig["bc"] if sig["is_buy"] else sig["sc"]
+            if (sig["conf"] >= min_conf and
+                votes_for >= min_votes and
+                not sig.get("skip", False) and
+                sig.get("adx_ok", False)):
+                best.append((pair_data["name"], sig))
+        except Exception as e:
+            print(f"Scan error {pair_data['name']}: {e}")
+    best.sort(key=lambda x: x[1]["conf"], reverse=True)
+    return best[:3]
+
+def auto_scan_loop(cid):
+    settings = get_scan_settings(cid)
+    print(f"🔄 Автосканування запущено для {cid}")
+    while settings.get("active", False):
+        try:
+            interval_sec = settings["interval"] * 60
+            tf = settings["tf"]
+            tf_name = TIMEFRAMES.get(tf, tf)
+            now_str = (datetime.now(timezone.utc)+timedelta(hours=2)).strftime("%H:%M")
+            bot.send_message(cid,
+                f"🔍 _Сканую {len(FOREX_PAIRS)+len(OTC_PAIRS)} пар на {tf_name}..._",
+                parse_mode="Markdown")
+            results = scan_all_pairs(cid, settings)
+            if not results:
+                bot.send_message(cid,
+                    f"😴 *{now_str}* — сильних сигналів немає\n"
+                    f"_Наступне через {settings['interval']} хв_",
+                    parse_mode="Markdown")
+            else:
+                bot.send_message(cid,
+                    f"🎯 *{now_str} — знайдено {len(results)} сигналів!*",
+                    parse_mode="Markdown")
+                for pair_name, sig in results:
+                    if cid not in last_signal:
+                        last_signal[cid] = {}
+                    last_signal[cid] = {
+                        "pair": pair_name, "tf": tf,
+                        "votes": sig.get("votes_raw", sig["votes"]),
+                        "conf": sig["conf"]
+                    }
+                    bot.send_message(cid, format_signal(pair_name, tf, sig),
+                                     parse_mode="Markdown", reply_markup=result_kb(pair_name, tf))
+                    time.sleep(1)
+            for _ in range(interval_sec // 60):
+                if not settings.get("active", False):
+                    break
+                time.sleep(60)
+        except Exception as e:
+            print(f"AutoScan error: {e}")
+            time.sleep(30)
+    print(f"Автосканування зупинено для {cid}")
+
+def start_auto_scan(cid):
+    settings = get_scan_settings(cid)
+    settings["active"] = True
+    old = auto_scan_threads.get(cid)
+    if old and old.is_alive():
+        pass
+    t = threading.Thread(target=auto_scan_loop, args=(cid,), daemon=True)
+    auto_scan_threads[cid] = t
+    t.start()
+
+def stop_auto_scan(cid):
+    settings = get_scan_settings(cid)
+    settings["active"] = False
+
+def auto_scan_menu_kb(cid):
+    s = get_scan_settings(cid)
+    tf_name = TIMEFRAMES.get(s["tf"], s["tf"])
+    kb = InlineKeyboardMarkup(row_width=2)
+    if s["active"]:
+        kb.add(InlineKeyboardButton("⏹ ЗУПИНИТИ", callback_data="scan_stop"))
+    else:
+        kb.add(InlineKeyboardButton("▶️ ЗАПУСТИТИ", callback_data="scan_start"))
+    kb.add(
+        InlineKeyboardButton(f"⏱ ТФ: {tf_name}", callback_data="scan_tf"),
+        InlineKeyboardButton(f"🔁 {s['interval']} хв", callback_data="scan_interval"),
+    )
+    kb.add(
+        InlineKeyboardButton(f"🎯 Мін {s['min_conf']}%", callback_data="scan_conf"),
+        InlineKeyboardButton(f"✅ Мін {s['min_votes']}/10", callback_data="scan_votes"),
+    )
+    kb.add(InlineKeyboardButton("◀️ Меню", callback_data="main"))
+    return kb
+
+def auto_scan_text(cid):
+    s = get_scan_settings(cid)
+    status = "🟢 АКТИВНЕ" if s["active"] else "🔴 ВИМКНЕНО"
+    tf_name = TIMEFRAMES.get(s["tf"], s["tf"])
+    pairs_count = len(FOREX_PAIRS) + len(OTC_PAIRS)
+    return (
+        f"🔍 *Автосканування*\n\n"
+        f"Статус: *{status}*\n"
+        f"⏱ Таймфрейм: *{tf_name}*\n"
+        f"🔁 Інтервал: *кожні {s['interval']} хв*\n"
+        f"🎯 Мін. впевненість: *{s['min_conf']}%*\n"
+        f"✅ Мін. підтверджень: *{s['min_votes']}/10*\n\n"
+        f"📊 Сканує: *{pairs_count} пар*\n\n"
+        f"_Бот надсилає тільки найкращі сигнали автоматично_"
+    )
+
+# ══════════════════════════════════════════
 #  ЗАПУСК
 # ══════════════════════════════════════════
 if __name__=="__main__":
-    print("✅ AI Signal Bot запущено!")
+    import threading
+    print("✅ AI Signal Bot v3 + Автосканування запущено!")
+    # Запустити автосканування в окремому потоці
+    scan_thread = threading.Thread(target=auto_scan_loop, daemon=True)
+    scan_thread.start()
     bot.infinity_polling()
