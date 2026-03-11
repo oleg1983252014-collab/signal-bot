@@ -415,18 +415,40 @@ def generate_signal(pair_name, tf):
     bc=sum(1 for v in votes if v[1]==1)
     sc=sum(1 for v in votes if v[1]==-1)
     score=bc-sc; is_buy=score>=0
-    adx_ok=adx>=25
-    # Бонус за підтвердження MTF і патернів
-    mtf_bonus=5 if (mtf_score==1 and is_buy) or (mtf_score==-1 and not is_buy) else 0
-    pat_bonus=3 if (pat_score>0 and is_buy) or (pat_score<0 and not is_buy) else 0
-    conf=min(97,round(68+min(abs(score)/10,1)*22+(min(adx/100,.12)*8)+(4 if adx_ok else 0)+mtf_bonus+pat_bonus))
-    sc2=max(bc,sc)
-    if sc2<4:   conf=min(conf,78); strength="⚠️ СЛАБКИЙ"
-    elif sc2<7: conf=min(conf,89); strength="✅ СЕРЕДНІЙ"
-    else:       strength="🔥 СИЛЬНИЙ"
+    tv=len(votes)
 
-    # Попередження S/R знижує впевненість
-    if sr_warn: conf=max(60,conf-8)
+    # ══ ЖОРСТКІ ФІЛЬТРИ ══
+    adx_ok   = adx>=30              # Підвищено з 25 до 30
+    mtf_ok   = (mtf_score==1 and is_buy) or (mtf_score==-1 and not is_buy)
+    pat_ok   = (pat_score>0 and is_buy) or (pat_score<0 and not is_buy)
+    sr_block = bool(sr_warn)        # Ціна біля S/R — блокуємо
+
+    # Бонуси
+    mtf_bonus = 6 if mtf_ok else -4          # MTF не збігається — штраф
+    pat_bonus = 4 if pat_ok else 0
+    adx_bonus = round(min(adx/100,.15)*10)
+
+    conf=min(97,round(66+min(abs(score)/tv,1)*24+adx_bonus+(5 if adx_ok else 0)+mtf_bonus+pat_bonus))
+
+    sc2=max(bc,sc)
+
+    # ══ РІВНІ СИЛИ (жорсткіші пороги) ══
+    if sc2<5 or not adx_ok:
+        conf=min(conf,72); strength="⛔ ПРОПУСТІТЬ"
+        skip=True
+    elif sc2<7 or not mtf_ok:
+        conf=min(conf,83); strength="⚠️ СЛАБКИЙ — обережно"
+        skip=False
+    elif sc2<9:
+        conf=min(conf,91); strength="✅ СЕРЕДНІЙ"
+        skip=False
+    else:
+        strength="🔥 СИЛЬНИЙ — входити!"; skip=False
+
+    # S/R блокує сигнал
+    if sr_block:
+        conf=max(55,conf-10)
+        if skip==False and sc2<8: strength="⚠️ S/R блокує — ризик"
 
     d=m["d"]; mult=1 if live>100 else(.01 if live>10 else .0001)
     atr=sum(abs(closes[i]-closes[i-1]) for i in range(-10,0))/10 if real and len(closes)>=10 else mult*3
@@ -435,18 +457,17 @@ def generate_signal(pair_name, tf):
     tp2=round(live+atr*2.5,d) if is_buy else round(live-atr*2.5,d)
     sl =round(live-atr*sp,d)  if is_buy else round(live+atr*sp,d)
     rr =round(abs(tp1-live)/abs(sl-live),1) if abs(sl-live)>0 else 1.5
-    # TP/SL прив'язані до рівнів S/R
     if is_buy and nr: tp1=round(min(tp1,nr*0.999),d)
     if not is_buy and ns: tp1=round(max(tp1,ns*1.001),d)
 
     return dict(is_buy=is_buy,signal="BUY ▲" if is_buy else "SELL ▼",conf=conf,
-                strength=strength,live=live,tp1=tp1,tp2=tp2,sl=sl,rr=rr,
+                strength=strength,skip=skip,live=live,tp1=tp1,tp2=tp2,sl=sl,rr=rr,
                 rsi=rsi,adx=adx,adx_ok=adx_ok,macd=macd,stoch=stoch,bb=bb,
                 e9=round(e9,d),e21=round(e21,d),e50=round(e50,d),
                 votes=votes,bc=bc,sc=sc,real=real,is_otc=is_otc,
                 nr=nr,ns=ns,sr_warn=sr_warn,pat_desc=pat_desc,
                 mtf_desc=mtf_desc,vol_desc=vol_desc,
-                total_votes=len(votes))
+                total_votes=tv,mtf_ok=mtf_ok,pat_ok=pat_ok)
 
 def format_signal(pair,tf,d):
     now_dt=datetime.now(timezone.utc)+timedelta(hours=2)
@@ -466,22 +487,50 @@ def format_signal(pair,tf,d):
     vt  = "".join(f"{'🟢' if v[1]==1 else '🔴' if v[1]==-1 else '⚪'} {v[2]}\n" for v in d["votes"])
 
     # ══ КОЛЬОРОВЕ ОФОРМЛЕННЯ ══
+    skip = d.get("skip", False)
+    mtf_ok = d.get("mtf_ok", True)
+    pat_ok = d.get("pat_ok", False)
+
+    if skip:
+        # Сигнал слабкий — показуємо попередження
+        return f"""⛔⛔⛔⛔⛔⛔⛔⛔⛔⛔
+⚡ *AI SIGNAL BOT v3 — Pocket Option*
+{mkt} | {"🔴 Live" if d["real"] else "⚙️ Розрах"} | {now}
+⛔⛔⛔⛔⛔⛔⛔⛔⛔⛔
+
+🚫 *СИГНАЛ ЗАБЛОКОВАНО*
+💪 {d["strength"]}
+
+❌ Причини блокування:
+{"✅" if d["adx_ok"] else "❌"} ADX={d["adx"]} {"≥30 ✅" if d["adx_ok"] else "<30 — тренд слабкий"}
+{"✅" if mtf_ok else "❌"} MTF {"збігається" if mtf_ok else "не збігається зі старшим ТФ"}
+📊 Підтверджень: {d["bc"] if is_buy else d["sc"]}/{tv} (потрібно 5+)
+
+⏭ _Очікуйте сильнішого сигналу_
+⛔⛔⛔⛔⛔⛔⛔⛔⛔⛔
+⚠️ _Не є фінансовою порадою_""".strip()
+
     if is_buy:
-        header    = "🟩🟩🟩🟩🟩🟩🟩🟩🟩🟩"
-        direction = "📗 КУПИТИ — BUY ▲ 📗"
-        border    = "🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢"
-        conf_bar  = "🟩" * round(d["conf"]/10) + "⬜" * (10-round(d["conf"]/10))
-        arrow     = "⬆️⬆️⬆️"
-        color_tp  = "💚"
-        color_sl  = "❤️"
+        header   = "🟩🟩🟩🟩🟩🟩🟩🟩🟩🟩"
+        direction= "📗 КУПИТИ — BUY ▲ 📗"
+        border   = "🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢"
+        conf_bar = "🟩"*round(d["conf"]/10)+"⬜"*(10-round(d["conf"]/10))
+        arrow    = "⬆️⬆️⬆️"
+        color_tp = "💚"; color_sl="❤️"
     else:
-        header    = "🟥🟥🟥🟥🟥🟥🟥🟥🟥🟥"
-        direction = "📕 ПРОДАТИ — SELL ▼ 📕"
-        border    = "🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴"
-        conf_bar  = "🟥" * round(d["conf"]/10) + "⬜" * (10-round(d["conf"]/10))
-        arrow     = "⬇️⬇️⬇️"
-        color_tp  = "❤️"
-        color_sl  = "💚"
+        header   = "🟥🟥🟥🟥🟥🟥🟥🟥🟥🟥"
+        direction= "📕 ПРОДАТИ — SELL ▼ 📕"
+        border   = "🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴"
+        conf_bar = "🟥"*round(d["conf"]/10)+"⬜"*(10-round(d["conf"]/10))
+        arrow    = "⬇️⬇️⬇️"
+        color_tp = "❤️"; color_sl="💚"
+
+    # Статус фільтрів
+    filters = (
+        f"{'✅' if d['adx_ok'] else '⚠️'} ADX={d['adx']} {'≥30' if d['adx_ok'] else '<30'} | "
+        f"{'✅' if mtf_ok else '⚠️'} MTF | "
+        f"{'✅' if pat_ok else '⚪'} Патерн"
+    )
 
     return f"""{header}
 ⚡ *AI SIGNAL BOT v3 — Pocket Option*
@@ -496,7 +545,7 @@ def format_signal(pair,tf,d):
 📊 *Впевненість: {d["conf"]}%*
 {conf_bar}
 ✅ BUY: `{d["bc"]}/{tv}` | 🔴 SELL: `{d["sc"]}/{tv}`
-📐 ADX={d["adx"]} {"💪 сильний" if d["adx_ok"] else "⚠️ слабкий"}{adw}{sr_line}
+📐 {filters}{adw}{sr_line}
 {border}
 
 *Пара:* `{pair}` | *ТФ:* `{TIMEFRAMES.get(tf,tf)}`
