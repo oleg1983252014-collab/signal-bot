@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import os, math, time, requests
+import os, math, time, requests, threading, json
 from datetime import datetime, timezone, timedelta
 from telebot import TeleBot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
@@ -75,14 +75,131 @@ CRYPTO_TF  = {"5":"5 хвилин","15":"15 хвилин","30":"30 хвилин"
 STOCKS_TF  = {"5":"5 хвилин","15":"15 хвилин","30":"30 хвилин","60":"1 година"}
 
 # ══════════════════════════════════════════
-#  СТАТИСТИКА (зберігається в пам'яті)
+#  СТАТИСТИКА + МАШИННЕ НАВЧАННЯ (Рівень 2)
 # ══════════════════════════════════════════
-user_stats = {}
+user_stats  = {}
+last_signal = {}   # зберігає останній сигнал для ML
+# Автосканування керується через auto_scan_settings і auto_scan_threads
+
+# Початкові ваги індикаторів (однакові для всіх)
+DEFAULT_WEIGHTS = {
+    "RSI": 1.0, "MACD": 1.0, "EMA Cross": 1.0,
+    "Ichimoku": 1.0, "Stoch": 1.0, "BB": 1.0,
+    "EMA50": 1.0, "MTF": 1.2, "Обсяг": 0.8, "Патерн": 0.9
+}
 
 def get_stats(cid):
     if cid not in user_stats:
-        user_stats[cid] = {"total":0,"wins":0,"losses":0,"pairs":{},"streak":0}
-    return user_stats[cid]
+        user_stats[cid] = {
+            "total":0,"wins":0,"losses":0,"pairs":{},"streak":0,
+            # ML дані
+            "weights": DEFAULT_WEIGHTS.copy(),   # ваги індикаторів
+            "indicator_stats": {},               # точність кожного індикатора
+            "tf_stats": {},                      # точність по таймфреймах
+            "history": [],                       # останні 500 угод
+            "last_trained": 0,                   # коли останній раз навчались
+        }
+    s = user_stats[cid]
+    # Якщо старий формат — оновити
+    if "weights" not in s:
+        s["weights"] = DEFAULT_WEIGHTS.copy()
+        s["indicator_stats"] = {}
+        s["tf_stats"] = {}
+        s["history"] = []
+        s["last_trained"] = 0
+    return s
+
+def record_trade(cid, pair, tf, votes, conf, result_win):
+    """Зберігає угоду для навчання"""
+    s = get_stats(cid)
+    trade = {
+        "pair": pair, "tf": tf, "conf": conf,
+        "votes": [(v[0], v[1]) for v in votes],
+        "win": result_win,
+        "time": int(time.time())
+    }
+    s["history"].append(trade)
+    if len(s["history"]) > 500:
+        s["history"] = s["history"][-500:]
+
+    # Оновити статистику по індикаторах
+    for name, vote in trade["votes"]:
+        if name not in s["indicator_stats"]:
+            s["indicator_stats"][name] = {"correct":0,"total":0}
+        is_buy_signal = vote == 1
+        if (is_buy_signal and result_win) or (not is_buy_signal and not result_win):
+            s["indicator_stats"][name]["correct"] += 1
+        s["indicator_stats"][name]["total"] += 1
+
+    # Оновити статистику по таймфреймах
+    if tf not in s["tf_stats"]:
+        s["tf_stats"][tf] = {"wins":0,"total":0}
+    s["tf_stats"][tf]["total"] += 1
+    if result_win: s["tf_stats"][tf]["wins"] += 1
+
+    # Автонавчання кожні 20 угод
+    if s["total"] % 20 == 0 and s["total"] >= 20:
+        ml_train(cid)
+
+def ml_train(cid):
+    """Перераховує ваги індикаторів на основі статистики"""
+    s = get_stats(cid)
+    if s["total"] < 20:
+        return
+    new_weights = {}
+    for name, base in DEFAULT_WEIGHTS.items():
+        if name in s["indicator_stats"]:
+            stat = s["indicator_stats"][name]
+            if stat["total"] >= 10:
+                accuracy = stat["correct"] / stat["total"]
+                # Точніший індикатор отримує більшу вагу (0.5 - 2.0)
+                weight = round(max(0.5, min(2.0, base * (accuracy / 0.6))), 2)
+                new_weights[name] = weight
+            else:
+                new_weights[name] = base
+        else:
+            new_weights[name] = base
+    s["weights"] = new_weights
+    s["last_trained"] = int(time.time())
+
+def get_weights(cid):
+    """Повертає навчені ваги для конкретного користувача"""
+    return get_stats(cid).get("weights", DEFAULT_WEIGHTS.copy())
+
+def ml_status_text(cid):
+    """Текст про статус ML навчання"""
+    s = get_stats(cid)
+    total = s["total"]
+    if total < 20:
+        need = 20 - total
+        return f"🤖 *ML навчання:* очікує {need} угод для старту"
+    weights = s.get("weights", DEFAULT_WEIGHTS)
+    trained = s.get("last_trained", 0)
+    trained_str = datetime.fromtimestamp(trained, tz=timezone.utc).strftime("%d.%m %H:%M") if trained else "ще не"
+    # Топ індикатори
+    ind_stats = s.get("indicator_stats", {})
+    top = sorted(
+        [(n, d["correct"]/d["total"]*100) for n,d in ind_stats.items() if d["total"]>=5],
+        key=lambda x: x[1], reverse=True
+    )[:3]
+    top_txt = "\n".join(f"  🏆 {n}: {round(acc)}%" for n,acc in top) if top else "  Ще мало даних"
+    # Найкращий ТФ
+    tf_stats = s.get("tf_stats", {})
+    best_tf = max(tf_stats.items(), key=lambda x: x[1]["wins"]/(x[1]["total"] or 1)) if tf_stats else None
+    tf_txt = f"  ⏱ {best_tf[0]}хв: {round(best_tf[1]['wins']/(best_tf[1]['total'] or 1)*100)}%" if best_tf else "  Ще мало даних"
+    # Ваги що найбільше змінились
+    changed = [(n, w) for n,w in weights.items() if abs(w - DEFAULT_WEIGHTS.get(n,1.0)) > 0.1]
+    changed_txt = "\n".join(f"  {'📈' if w>1 else '📉'} {n}: {w}x" for n,w in changed[:3]) if changed else "  Ваги ще не змінились"
+    return (
+        f"🤖 *ML Навчання — Рівень 2*\n\n"
+        f"📊 Угод для навчання: `{total}`\n"
+        f"🕐 Останнє навчання: `{trained_str}`\n"
+        f"🔄 Наступне: через `{20 - (total % 20)}` угод\n\n"
+        f"🏆 *Найточніші індикатори:*\n{top_txt}\n\n"
+        f"⏱ *Найкращий таймфрейм:*\n{tf_txt}\n\n"
+        f"⚖️ *Адаптовані ваги:*\n{changed_txt}\n\n"
+        f"_Бот вчиться на вашій статистиці автоматично_"
+    )
 
 def stats_text(cid):
     s = get_stats(cid)
@@ -94,9 +211,10 @@ def stats_text(cid):
     bt   = "".join(f"  • {n}: {d['wins']}/{d['total']} ({round(d['wins']/(d['total'] or 1)*100)}%)\n" for n,d in best)
     st   = s.get("streak",0)
     sl   = (f"🔥 Серія виграшів: {st}\n" if st>1 else f"❄️ Серія програшів: {abs(st)}\n" if st<-1 else "")
+    ml   = ml_status_text(cid)
     return (f"📊 *Статистика*\n\nВсього: `{s['total']}`\n✅ Виграші: `{s['wins']}`\n"
             f"❌ Програші: `{s['losses']}`\n\n🏆 *WR: {wr}%*\n{bar}\n\n{sl}"
-            f"🥇 *Кращі пари:*\n{bt}")
+            f"🥇 *Кращі пари:*\n{bt}\n\n━━━━━━━━━━━━━━━━━━━━\n{ml}")
 
 # ══════════════════════════════════════════
 #  ТОРГОВІ СЕСІЇ
@@ -339,7 +457,7 @@ def nearest_sr(price, resistances, supports, decimals):
 # ══════════════════════════════════════════
 #  ГЕНЕРАЦІЯ СИГНАЛУ v3 (MTF + S/R + Patterns + Volume)
 # ══════════════════════════════════════════
-def generate_signal(pair_name, tf):
+def generate_signal(pair_name, tf, cid=None):
     m=ALL_PAIRS.get(pair_name,FOREX_PAIRS[0])
     is_otc="OTC" in pair_name
     closes,highs,lows,volumes=get_candles(m["symbol"],tf,60)
@@ -412,21 +530,47 @@ def generate_signal(pair_name, tf):
     elif pat_score<0: votes.append(("Патерн",-1,pat_desc))
     else:             votes.append(("Патерн",0,pat_desc))
 
+    # ══ ML ВАГИ — застосовуємо навчені ваги ══
+    weights = get_weights(cid) if cid else DEFAULT_WEIGHTS
+    weighted_score = sum(v[1] * weights.get(v[0], 1.0) for v in votes)
     bc=sum(1 for v in votes if v[1]==1)
     sc=sum(1 for v in votes if v[1]==-1)
-    score=bc-sc; is_buy=score>=0
-    adx_ok=adx>=25
-    # Бонус за підтвердження MTF і патернів
-    mtf_bonus=5 if (mtf_score==1 and is_buy) or (mtf_score==-1 and not is_buy) else 0
-    pat_bonus=3 if (pat_score>0 and is_buy) or (pat_score<0 and not is_buy) else 0
-    conf=min(97,round(68+min(abs(score)/10,1)*22+(min(adx/100,.12)*8)+(4 if adx_ok else 0)+mtf_bonus+pat_bonus))
-    sc2=max(bc,sc)
-    if sc2<4:   conf=min(conf,78); strength="⚠️ СЛАБКИЙ"
-    elif sc2<7: conf=min(conf,89); strength="✅ СЕРЕДНІЙ"
-    else:       strength="🔥 СИЛЬНИЙ"
+    # Зважений score замість простого підрахунку
+    score = weighted_score; is_buy = score >= 0
+    tv=len(votes)
 
-    # Попередження S/R знижує впевненість
-    if sr_warn: conf=max(60,conf-8)
+    # ══ ЖОРСТКІ ФІЛЬТРИ ══
+    adx_ok   = adx>=30              # Підвищено з 25 до 30
+    mtf_ok   = (mtf_score==1 and is_buy) or (mtf_score==-1 and not is_buy)
+    pat_ok   = (pat_score>0 and is_buy) or (pat_score<0 and not is_buy)
+    sr_block = bool(sr_warn)        # Ціна біля S/R — блокуємо
+
+    # Бонуси
+    mtf_bonus = 6 if mtf_ok else -4          # MTF не збігається — штраф
+    pat_bonus = 4 if pat_ok else 0
+    adx_bonus = round(min(adx/100,.15)*10)
+
+    conf=min(97,round(66+min(abs(score)/tv,1)*24+adx_bonus+(5 if adx_ok else 0)+mtf_bonus+pat_bonus))
+
+    sc2=max(bc,sc)
+
+    # ══ РІВНІ СИЛИ (жорсткіші пороги) ══
+    if sc2<5 or not adx_ok:
+        conf=min(conf,72); strength="⛔ ПРОПУСТІТЬ"
+        skip=True
+    elif sc2<7 or not mtf_ok:
+        conf=min(conf,83); strength="⚠️ СЛАБКИЙ — обережно"
+        skip=False
+    elif sc2<9:
+        conf=min(conf,91); strength="✅ СЕРЕДНІЙ"
+        skip=False
+    else:
+        strength="🔥 СИЛЬНИЙ — входити!"; skip=False
+
+    # S/R блокує сигнал
+    if sr_block:
+        conf=max(55,conf-10)
+        if skip==False and sc2<8: strength="⚠️ S/R блокує — ризик"
 
     d=m["d"]; mult=1 if live>100 else(.01 if live>10 else .0001)
     atr=sum(abs(closes[i]-closes[i-1]) for i in range(-10,0))/10 if real and len(closes)>=10 else mult*3
@@ -435,18 +579,18 @@ def generate_signal(pair_name, tf):
     tp2=round(live+atr*2.5,d) if is_buy else round(live-atr*2.5,d)
     sl =round(live-atr*sp,d)  if is_buy else round(live+atr*sp,d)
     rr =round(abs(tp1-live)/abs(sl-live),1) if abs(sl-live)>0 else 1.5
-    # TP/SL прив'язані до рівнів S/R
     if is_buy and nr: tp1=round(min(tp1,nr*0.999),d)
     if not is_buy and ns: tp1=round(max(tp1,ns*1.001),d)
 
     return dict(is_buy=is_buy,signal="BUY ▲" if is_buy else "SELL ▼",conf=conf,
-                strength=strength,live=live,tp1=tp1,tp2=tp2,sl=sl,rr=rr,
+                strength=strength,skip=skip,live=live,tp1=tp1,tp2=tp2,sl=sl,rr=rr,
                 rsi=rsi,adx=adx,adx_ok=adx_ok,macd=macd,stoch=stoch,bb=bb,
                 e9=round(e9,d),e21=round(e21,d),e50=round(e50,d),
                 votes=votes,bc=bc,sc=sc,real=real,is_otc=is_otc,
                 nr=nr,ns=ns,sr_warn=sr_warn,pat_desc=pat_desc,
                 mtf_desc=mtf_desc,vol_desc=vol_desc,
-                total_votes=len(votes))
+                total_votes=tv,mtf_ok=mtf_ok,pat_ok=pat_ok,
+                votes_raw=votes,weighted_score=round(weighted_score,2))
 
 def format_signal(pair,tf,d):
     now_dt=datetime.now(timezone.utc)+timedelta(hours=2)
@@ -454,49 +598,96 @@ def format_signal(pair,tf,d):
     tf_hold={"1":(1,2),"3":(3,5),"5":(5,10),"15":(15,20),"30":(30,35),"60":(60,75),"240":(240,260)}
     hm=tf_hold.get(tf,(5,10))
     exp=(now_dt+timedelta(minutes=hm[0])).strftime("%H:%M")
-    bar="█"*round(d["conf"]/10)+"░"*(10-round(d["conf"]/10))
-    adw="" if d["adx_ok"] else "\n⚠️ _ADX<25 — тренд слабкий!_"
-    vt="".join(f"{'🟢' if v[1]==1 else '🔴' if v[1]==-1 else '⚪'} {v[2]}\n" for v in d["votes"])
-    is_crypto = pair in [p['name'] for p in CRYPTO_PAIRS]
-    is_stocks = pair in [p['name'] for p in STOCKS_PAIRS]
-    mkt = '₿ КРИПТО' if is_crypto else ('📊 АКЦІЇ' if is_stocks else ('🌙 OTC' if d['is_otc'] else '📈 FOREX'))
-    tv  = d.get('total_votes', 7)
-    sr_line = f"\n{d['sr_warn']}" if d.get('sr_warn') else ""
-    nr_line = f"🔴 Опір:       `{d['nr']}`\n" if d.get('nr') else ""
-    ns_line = f"🟢 Підтримка:  `{d['ns']}`\n" if d.get('ns') else ""
-    return f"""⚡ *AI SIGNAL BOT v3 — Pocket Option*
-{mkt} | {'🔴 Live' if d['real'] else '⚙️ Розрах'}
+    is_buy=d["is_buy"]
+    is_crypto = pair in [p["name"] for p in CRYPTO_PAIRS]
+    is_stocks = pair in [p["name"] for p in STOCKS_PAIRS]
+    mkt = "₿ КРИПТО" if is_crypto else ("📊 АКЦІЇ" if is_stocks else ("🌙 OTC" if d["is_otc"] else "📈 FOREX"))
+    tv  = d.get("total_votes", 7)
+    sr_line = f"\n{d['sr_warn']}" if d.get("sr_warn") else ""
+    nr_line = f"🔴 Опір:      `{d['nr']}`\n" if d.get("nr") else ""
+    ns_line = f"🟢 Підтримка: `{d['ns']}`\n" if d.get("ns") else ""
+    adw = "" if d["adx_ok"] else "\n⚠️ _ADX<25 — тренд слабкий!_"
+    vt  = "".join(f"{'🟢' if v[1]==1 else '🔴' if v[1]==-1 else '⚪'} {v[2]}\n" for v in d["votes"])
+
+    # ══ КОЛЬОРОВЕ ОФОРМЛЕННЯ ══
+    skip = d.get("skip", False)
+    mtf_ok = d.get("mtf_ok", True)
+    pat_ok = d.get("pat_ok", False)
+
+    if skip:
+        # Сигнал слабкий — показуємо попередження
+        return f"""⛔⛔⛔⛔⛔⛔⛔⛔⛔⛔
+⚡ *AI SIGNAL BOT v3 — Pocket Option*
+{mkt} | {"🔴 Live" if d["real"] else "⚙️ Розрах"} | {now}
+⛔⛔⛔⛔⛔⛔⛔⛔⛔⛔
+
+🚫 *СИГНАЛ ЗАБЛОКОВАНО*
+💪 {d["strength"]}
+
+❌ Причини блокування:
+{"✅" if d["adx_ok"] else "❌"} ADX={d["adx"]} {"≥30 ✅" if d["adx_ok"] else "<30 — тренд слабкий"}
+{"✅" if mtf_ok else "❌"} MTF {"збігається" if mtf_ok else "не збігається зі старшим ТФ"}
+📊 Підтверджень: {d["bc"] if is_buy else d["sc"]}/{tv} (потрібно 5+)
+
+⏭ _Очікуйте сильнішого сигналу_
+⛔⛔⛔⛔⛔⛔⛔⛔⛔⛔
+⚠️ _Не є фінансовою порадою_""".strip()
+
+    if is_buy:
+        header   = "🟩🟩🟩🟩🟩🟩🟩🟩🟩🟩"
+        direction= "📗 КУПИТИ — BUY ▲ 📗"
+        border   = "🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢"
+        conf_bar = "🟩"*round(d["conf"]/10)+"⬜"*(10-round(d["conf"]/10))
+        arrow    = "⬆️⬆️⬆️"
+        color_tp = "💚"; color_sl="❤️"
+    else:
+        header   = "🟥🟥🟥🟥🟥🟥🟥🟥🟥🟥"
+        direction= "📕 ПРОДАТИ — SELL ▼ 📕"
+        border   = "🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴"
+        conf_bar = "🟥"*round(d["conf"]/10)+"⬜"*(10-round(d["conf"]/10))
+        arrow    = "⬇️⬇️⬇️"
+        color_tp = "❤️"; color_sl="💚"
+
+    # Статус фільтрів
+    filters = (
+        f"{'✅' if d['adx_ok'] else '⚠️'} ADX={d['adx']} {'≥30' if d['adx_ok'] else '<30'} | "
+        f"{'✅' if mtf_ok else '⚠️'} MTF | "
+        f"{'✅' if pat_ok else '⚪'} Патерн"
+    )
+
+    return f"""{header}
+⚡ *AI SIGNAL BOT v3 — Pocket Option*
+{mkt} | {"🔴 Live" if d["real"] else "⚙️ Розрах"} | {now}
+{header}
+
+{arrow} *{direction}* {arrow}
+💪 Сила: *{d["strength"]}*
+⏱ Утримувати: *{hm[0]}–{hm[1]} хв* | 🕐 Експірація: *{exp}*
+
+{border}
+📊 *Впевненість: {d["conf"]}%*
+{conf_bar}
+✅ BUY: `{d["bc"]}/{tv}` | 🔴 SELL: `{d["sc"]}/{tv}`
+📐 {filters}{adw}{sr_line}
+{border}
 
 *Пара:* `{pair}` | *ТФ:* `{TIMEFRAMES.get(tf,tf)}`
-*Час:* `{now}`
-
-━━━━━━━━━━━━━━━━━━━━
-🎯 *СИГНАЛ: {'🟢 BUY ▲' if d['is_buy'] else '🔴 SELL ▼'}*
-💪 *Сила: {d['strength']}*
-⏱ *Утримувати: {hm[0]}–{hm[1]} хв*
-🕐 *Експірація: {exp}*
-━━━━━━━━━━━━━━━━━━━━
-
-📊 *Впевненість: {d['conf']}%*
-`{bar}`
-✅ BUY: `{d['bc']}/{tv}` | 🔴 SELL: `{d['sc']}/{tv}`
-📐 ADX={d['adx']} {'💪' if d['adx_ok'] else '⚠️'}{adw}{sr_line}
-
-💰 *Рівні входу*
-Вхід: `{d['live']}` | SL: `{d['sl']}` | R/R: `1:{d['rr']}`
-TP1: `{d['tp1']}` | TP2: `{d['tp2']}`
+💰 Вхід: `{d["live"]}`
+{color_tp} TP1: `{d["tp1"]}` | TP2: `{d["tp2"]}`
+{color_sl} SL:  `{d["sl"]}` | R/R: `1:{d["rr"]}`
 {nr_line}{ns_line}
-📉 EMA9:`{d['e9']}` EMA21:`{d['e21']}` EMA50:`{d['e50']}`
+📉 EMA9:`{d["e9"]}` EMA21:`{d["e21"]}` EMA50:`{d["e50"]}`
 
-━━━━━━━━━━━━━━━━━━━━
-🔬 *{tv} індикаторів + MTF + Патерни:*
+{border}
+🔬 *{tv} індикаторів:*
 {vt}
+{header}
 ⚠️ _Не є фінансовою порадою_""".strip()
 
 # ══════════════════════════════════════════
 #  КЛАВІАТУРИ
 # ══════════════════════════════════════════
-def main_kb():
+def main_kb(cid=None):
     kb=InlineKeyboardMarkup(row_width=2)
     kb.add(InlineKeyboardButton("📈 FOREX",callback_data="menu_forex"),
            InlineKeyboardButton("🌙 OTC",callback_data="menu_otc"))
@@ -504,7 +695,12 @@ def main_kb():
            InlineKeyboardButton("📊 АКЦІЇ",callback_data="menu_stocks"))
     kb.add(InlineKeyboardButton("📊 Статистика",callback_data="stats"),
            InlineKeyboardButton("🕐 Сесії",callback_data="sessions"))
-    kb.add(InlineKeyboardButton("ℹ️ Про бота",callback_data="about"))
+    kb.add(InlineKeyboardButton("🤖 ML Навчання",callback_data="ml_status"),
+           InlineKeyboardButton("ℹ️ Про бота",callback_data="about"))
+    # Авто кнопка — показує статус
+    is_active = auto_scan_settings.get(cid,{}).get("active",False) if cid else False
+    auto_label = "🟢 АВТО: ВКЛ ✅" if is_active else "🔴 АВТО: ВИКЛ"
+    kb.add(InlineKeyboardButton(auto_label, callback_data="auto_menu"))
     return kb
 
 def crypto_kb():
@@ -555,9 +751,9 @@ def result_kb(pair,tf):
 def send_main(cid, mid=None):
     txt="⚡ *AI Signal Bot — Pocket Option*\n\nОберіть категорію:"
     if mid:
-        try: bot.edit_message_text(txt,cid,mid,parse_mode="Markdown",reply_markup=main_kb()); return
+        try: bot.edit_message_text(txt,cid,mid,parse_mode="Markdown",reply_markup=main_kb(cid)); return
         except: pass
-    bot.send_message(cid,txt,parse_mode="Markdown",reply_markup=main_kb())
+    bot.send_message(cid,txt,parse_mode="Markdown",reply_markup=main_kb(cid))
 
 @bot.message_handler(commands=["start","menu"])
 def cmd_start(msg):
@@ -571,86 +767,259 @@ def cmd_stats(msg):
 def cmd_sessions(msg):
     bot.send_message(msg.chat.id,sessions_text(),parse_mode="Markdown",reply_markup=main_kb())
 
+def safe_edit(bot, cid, mid, text, markup=None):
+    try:
+        bot.edit_message_text(text, cid, mid, parse_mode="Markdown", reply_markup=markup)
+    except Exception as e:
+        if "not modified" in str(e) or "400" in str(e):
+            try:
+                bot.edit_message_text(text+" ", cid, mid, parse_mode="Markdown", reply_markup=markup)
+            except:
+                bot.send_message(cid, text, parse_mode="Markdown", reply_markup=markup)
+        else:
+            bot.send_message(cid, text, parse_mode="Markdown", reply_markup=markup)
+
 @bot.callback_query_handler(func=lambda c: True)
 def handle_callback(call):
     cid=call.message.chat.id; mid=call.message.message_id; d=call.data
-
+    bot.answer_callback_query(call.id)
     try:
         if d=="main":
             send_main(cid,mid)
-
-        elif d=="menu_forex":
-            bot.edit_message_text("📈 *FOREX пари*\nОберіть пару:",cid,mid,parse_mode="Markdown",reply_markup=forex_kb())
-
-        elif d=="menu_otc":
-            bot.edit_message_text("🌙 *OTC пари*\nОберіть пару:",cid,mid,parse_mode="Markdown",reply_markup=otc_kb())
-
-        elif d=="menu_crypto":
-            bot.edit_message_text("₿ *Криптовалюти*\nОберіть пару:",cid,mid,parse_mode="Markdown",reply_markup=crypto_kb())
-
-        elif d=="menu_stocks":
-            bot.edit_message_text("📊 *Акції*\nОберіть актив:",cid,mid,parse_mode="Markdown",reply_markup=stocks_kb())
-
-        elif d=="forex_back":
-            bot.edit_message_text("📈 *FOREX пари*\nОберіть пару:",cid,mid,parse_mode="Markdown",reply_markup=forex_kb())
-
-        elif d=="otc_back":
-            bot.edit_message_text("🌙 *OTC пари*\nОберіть пару:",cid,mid,parse_mode="Markdown",reply_markup=otc_kb())
-
-        elif d=="crypto_back":
-            bot.edit_message_text("₿ *Криптовалюти*\nОберіть пару:",cid,mid,parse_mode="Markdown",reply_markup=crypto_kb())
-
-        elif d=="stocks_back":
-            bot.edit_message_text("📊 *Акції*\nОберіть актив:",cid,mid,parse_mode="Markdown",reply_markup=stocks_kb())
-
+        elif d in ("menu_forex","forex_back"):
+            safe_edit(bot,cid,mid,"📈 *FOREX пари*\nОберіть пару:",forex_kb())
+        elif d in ("menu_otc","otc_back"):
+            safe_edit(bot,cid,mid,"🌙 *OTC пари*\nОберіть пару:",otc_kb())
+        elif d in ("menu_crypto","crypto_back"):
+            safe_edit(bot,cid,mid,"₿ *Криптовалюти*\nОберіть пару:",crypto_kb())
+        elif d in ("menu_stocks","stocks_back"):
+            safe_edit(bot,cid,mid,"📊 *Акції*\nОберіть актив:",stocks_kb())
         elif d=="stats":
-            bot.edit_message_text(stats_text(cid),cid,mid,parse_mode="Markdown",reply_markup=main_kb())
-
+            safe_edit(bot,cid,mid,stats_text(cid),main_kb())
         elif d=="sessions":
-            bot.edit_message_text(sessions_text(),cid,mid,parse_mode="Markdown",reply_markup=main_kb())
+            safe_edit(bot,cid,mid,sessions_text(),main_kb())
+        elif d=="ml_status":
+            safe_edit(bot,cid,mid,ml_status_text(cid),main_kb(cid))
+
+        elif d=="auto_menu":
+            safe_edit(bot,cid,mid,auto_scan_text(cid),auto_scan_kb(cid))
+
+        elif d=="scan_start":
+            start_auto_scan(cid)
+            s=get_scan_settings(cid)
+            bot.send_message(cid,
+                f"✅ *Автосканування запущено!*\n\n"
+                f"⏱ Таймфрейм: *{s['tf']} хв*\n"
+                f"🎯 Мін. впевненість: *{s['min_conf']}%*\n"
+                f"✅ Мін. голосів: *{s['min_votes']}/10*\n\n"
+                f"_Перший сигнал через ~{s['tf']} хв_",
+                parse_mode="Markdown", reply_markup=auto_scan_kb(cid))
+
+        elif d=="scan_stop":
+            stop_auto_scan(cid)
+            bot.send_message(cid,
+                "⏹ *Автосканування зупинено*\n\nНатисніть ▶️ щоб увімкнути знову",
+                parse_mode="Markdown", reply_markup=main_kb(cid))
+
+        elif d=="scan_tf":
+            tfs=["5","15","30","60"]
+            s=get_scan_settings(cid)
+            cur=s.get("tf","5")
+            s["tf"]=tfs[(tfs.index(cur)+1)%len(tfs) if cur in tfs else 0]
+            safe_edit(bot,cid,mid,auto_scan_text(cid),auto_scan_kb(cid))
+
+        elif d=="scan_conf":
+            confs=[75,80,85,90,95]
+            s=get_scan_settings(cid)
+            cur=s.get("min_conf",85)
+            s["min_conf"]=confs[(confs.index(cur)+1)%len(confs) if cur in confs else 2]
+            safe_edit(bot,cid,mid,auto_scan_text(cid),auto_scan_kb(cid))
+
+        elif d=="scan_votes":
+            votes=[5,6,7,8,9]
+            s=get_scan_settings(cid)
+            cur=s.get("min_votes",7)
+            s["min_votes"]=votes[(votes.index(cur)+1)%len(votes) if cur in votes else 2]
+            safe_edit(bot,cid,mid,auto_scan_text(cid),auto_scan_kb(cid))
 
         elif d=="about":
-            txt=("ℹ️ *AI Signal Bot*\n\n"
+            txt=("ℹ️ *AI Signal Bot v3*\n\n"
                  "• RSI, MACD, EMA 9/21/50\n• Ichimoku Cloud\n• ADX фільтр\n"
-                 "• Stochastic, Bollinger Bands\n• 7 індикаторів одночасно\n\n"
+                 "• Stochastic, Bollinger Bands\n• MTF аналіз\n• Патерни свічок\n"
+                 "• Рівні підтримки/опору\n• Обсяг торгів\n\n"
                  "📡 Yahoo Finance API | UTC+2")
-            bot.edit_message_text(txt,cid,mid,parse_mode="Markdown",reply_markup=main_kb())
-
+            safe_edit(bot,cid,mid,txt,main_kb())
         elif d.startswith("pair_"):
             pair=d[5:]
-            bot.edit_message_text(f"⏱ *Таймфрейм для {pair}*\nОберіть:",cid,mid,
-                                   parse_mode="Markdown",reply_markup=tf_kb(pair))
-
+            safe_edit(bot,cid,mid,f"⏱ *Таймфрейм для {pair}*\nОберіть:",tf_kb(pair))
         elif d.startswith("tf|"):
             _,pair,tf=d.split("|",2)
-            bot.answer_callback_query(call.id,"⚡ Аналізую...")
             bot.edit_message_text(f"⏳ Аналізую *{pair}*...",cid,mid,parse_mode="Markdown")
-            sig=generate_signal(pair,tf)
+            sig=generate_signal(pair,tf,cid=cid)
+            # Зберігаємо останній сигнал для ML
+            if cid not in last_signal: last_signal[cid]={}
+            last_signal[cid]={"pair":pair,"tf":tf,"votes":sig.get("votes_raw",sig["votes"]),"conf":sig["conf"]}
             bot.edit_message_text(format_signal(pair,tf,sig),cid,mid,
                                    parse_mode="Markdown",reply_markup=result_kb(pair,tf))
-
         elif d.startswith("win|") or d.startswith("loss|"):
             res,pair,tf=d.split("|",2)
             s=get_stats(cid); s["total"]+=1
-            if res=="win":
+            is_win = res=="win"
+            if is_win:
                 s["wins"]+=1; s["streak"]=max(s.get("streak",0)+1,1); emoji="✅ Виграш записано!"
             else:
                 s["losses"]+=1; s["streak"]=min(s.get("streak",0)-1,-1); emoji="❌ Програш записано"
             if pair not in s["pairs"]: s["pairs"][pair]={"total":0,"wins":0}
             s["pairs"][pair]["total"]+=1
-            if res=="win": s["pairs"][pair]["wins"]+=1
+            if is_win: s["pairs"][pair]["wins"]+=1
+            # ML — записати угоду
+            ls = last_signal.get(cid,{})
+            if ls.get("pair")==pair:
+                record_trade(cid, pair, tf, ls.get("votes",[]), ls.get("conf",70), is_win)
             wr=round(s["wins"]/s["total"]*100)
-            bot.answer_callback_query(call.id,f"{emoji} WR: {wr}%")
-            bot.send_message(cid,f"{emoji}\n\n📊 WR: *{wr}%* ({s['wins']}W/{s['losses']}L)\n\nОберіть наступну дію:",
+            # Перевірити чи відбулось навчання
+            ml_note=""
+            if s["total"]>0 and s["total"]%20==0:
+                ml_note="\n\n🤖 _ML навчання оновлено! Ваги індикаторів перераховано._"
+            bot.send_message(cid,f"{emoji}\n\n📊 WR: *{wr}%* ({s['wins']}W/{s['losses']}L){ml_note}\n\nОберіть дію:",
                              parse_mode="Markdown",reply_markup=main_kb())
-
     except Exception as e:
         print(f"Помилка: {e}")
         bot.send_message(cid,"Оберіть категорію:",reply_markup=main_kb())
 
 # ══════════════════════════════════════════
+#  АВТОСКАНУВАННЯ
+# ══════════════════════════════════════════
+import threading
+
+auto_scan_settings = {}
+auto_scan_threads  = {}
+
+def get_scan_settings(cid):
+    if cid not in auto_scan_settings:
+        auto_scan_settings[cid] = {
+            "active": False, "tf": "5",
+            "min_conf": 85,  "min_votes": 7,
+        }
+    return auto_scan_settings[cid]
+
+def auto_scan_text(cid):
+    s = get_scan_settings(cid)
+    status   = "🟢 АКТИВНЕ" if s["active"] else "🔴 ВИМКНЕНО"
+    tf_name  = TIMEFRAMES.get(s["tf"], s["tf"])
+    n_pairs  = len(FOREX_PAIRS) + len(OTC_PAIRS) + len(CRYPTO_PAIRS[:4])
+    return (
+        f"🔍 *Автосканування*\n\n"
+        f"Статус: *{status}*\n"
+        f"⏱ Таймфрейм: *{tf_name}*\n"
+        f"🎯 Мін. впевненість: *{s['min_conf']}%*\n"
+        f"✅ Мін. підтверджень: *{s['min_votes']}/10*\n\n"
+        f"📊 Сканує: *{n_pairs} пар*\n\n"
+        f"_Бот надсилає тільки найкращі сигнали автоматично_"
+    )
+
+def auto_scan_kb(cid):
+    s = get_scan_settings(cid)
+    tf_name = TIMEFRAMES.get(s["tf"], s["tf"])
+    kb = InlineKeyboardMarkup(row_width=2)
+    if s["active"]:
+        kb.add(InlineKeyboardButton("⏹ ЗУПИНИТИ", callback_data="scan_stop"))
+    else:
+        kb.add(InlineKeyboardButton("▶️ ЗАПУСТИТИ", callback_data="scan_start"))
+    kb.add(
+        InlineKeyboardButton(f"⏱ ТФ: {tf_name}",       callback_data="scan_tf"),
+        InlineKeyboardButton(f"🎯 Мін: {s['min_conf']}%", callback_data="scan_conf"),
+    )
+    kb.add(
+        InlineKeyboardButton(f"✅ Голосів: {s['min_votes']}+", callback_data="scan_votes"),
+        InlineKeyboardButton("◀️ Меню",                  callback_data="main"),
+    )
+    return kb
+
+def autosignal_kb(pair, tf):
+    kb = InlineKeyboardMarkup(row_width=2)
+    kb.add(
+        InlineKeyboardButton("✅ Виграш",    callback_data=f"win|{pair}|{tf}"),
+        InlineKeyboardButton("❌ Програш",   callback_data=f"loss|{pair}|{tf}"),
+    )
+    kb.add(InlineKeyboardButton("⏹ Зупинити авто", callback_data="scan_stop"))
+    return kb
+
+def scan_all_pairs(cid, settings):
+    tf        = settings["tf"]
+    min_conf  = settings["min_conf"]
+    min_votes = settings["min_votes"]
+    all_pairs = FOREX_PAIRS + OTC_PAIRS + CRYPTO_PAIRS[:4]
+    best = []
+    for p in all_pairs:
+        try:
+            sig = generate_signal(p["name"], tf, cid=cid)
+            votes_for = sig["bc"] if sig["is_buy"] else sig["sc"]
+            if (sig["conf"] >= min_conf and
+                votes_for >= min_votes and
+                not sig.get("skip", False) and
+                sig.get("adx_ok", False)):
+                best.append((p["name"], sig))
+        except Exception as e:
+            print(f"Scan {p['name']}: {e}")
+    best.sort(key=lambda x: x[1]["conf"], reverse=True)
+    return best[:3]
+
+def auto_scan_loop(cid):
+    settings = get_scan_settings(cid)
+    print(f"🔄 Авто для {cid}")
+    while settings.get("active", False):
+        try:
+            tf       = settings["tf"]
+            tf_name  = TIMEFRAMES.get(tf, tf)
+            now_str  = (datetime.now(timezone.utc)+timedelta(hours=2)).strftime("%H:%M")
+            n_pairs  = len(FOREX_PAIRS)+len(OTC_PAIRS)+len(CRYPTO_PAIRS[:4])
+            results  = scan_all_pairs(cid, settings)
+            if not results:
+                bot.send_message(cid,
+                    f"🔍 *{now_str}* — сканував {n_pairs} пар\n"
+                    f"😴 Сильних сигналів немає (мін {settings['min_conf']}%)\n"
+                    f"_Наступне через {tf} хв_",
+                    parse_mode="Markdown")
+            else:
+                bot.send_message(cid,
+                    f"🎯 *{now_str} — знайдено {len(results)} сигнал(и)!*",
+                    parse_mode="Markdown")
+                for pair_name, sig in results:
+                    last_signal[cid] = {
+                        "pair": pair_name, "tf": tf,
+                        "votes": sig.get("votes_raw", sig["votes"]),
+                        "conf":  sig["conf"]
+                    }
+                    bot.send_message(cid, format_signal(pair_name, tf, sig),
+                        parse_mode="Markdown", reply_markup=autosignal_kb(pair_name, tf))
+                    time.sleep(1)
+            # Чекаємо інтервал (перевіряємо кожну хвилину)
+            interval_min = int(tf)
+            for _ in range(interval_min):
+                if not settings.get("active", False): break
+                time.sleep(60)
+        except Exception as e:
+            print(f"AutoScan err: {e}")
+            time.sleep(30)
+    print(f"Авто зупинено для {cid}")
+
+def start_auto_scan(cid):
+    s = get_scan_settings(cid)
+    s["active"] = True
+    old = auto_scan_threads.get(cid)
+    if old and old.is_alive():
+        return  # вже працює
+    t = threading.Thread(target=auto_scan_loop, args=(cid,), daemon=True)
+    auto_scan_threads[cid] = t
+    t.start()
+
+def stop_auto_scan(cid):
+    get_scan_settings(cid)["active"] = False
+
+# ══════════════════════════════════════════
 #  ЗАПУСК
 # ══════════════════════════════════════════
 if __name__=="__main__":
-    print("✅ AI Signal Bot запущено!")
+    print("✅ AI Signal Bot v3 + ML + Автосканування запущено!")
     bot.infinity_polling()
