@@ -44,8 +44,35 @@ OTC_PAIRS = [
     {"name":"CHF/JPY OTC","symbol":"CHFJPY=X","p":199.65,"d":3,"t":1},
     {"name":"EUR/AUD OTC","symbol":"EURAUD=X","p":1.8385,"d":5,"t":1},
 ]
-ALL_PAIRS = {p["name"]: p for p in FOREX_PAIRS + OTC_PAIRS}
+
+CRYPTO_PAIRS = [
+    {"name":"BTC/USD","symbol":"BTC-USD","p":67000,"d":1,"t":1},
+    {"name":"ETH/USD","symbol":"ETH-USD","p":3500,"d":2,"t":1},
+    {"name":"BNB/USD","symbol":"BNB-USD","p":420,"d":2,"t":1},
+    {"name":"SOL/USD","symbol":"SOL-USD","p":180,"d":2,"t":1},
+    {"name":"XRP/USD","symbol":"XRP-USD","p":0.62,"d":4,"t":1},
+    {"name":"ADA/USD","symbol":"ADA-USD","p":0.45,"d":4,"t":-1},
+    {"name":"DOGE/USD","symbol":"DOGE-USD","p":0.18,"d":5,"t":1},
+    {"name":"MATIC/USD","symbol":"MATIC-USD","p":0.95,"d":4,"t":-1},
+    {"name":"LTC/USD","symbol":"LTC-USD","p":95,"d":2,"t":1},
+    {"name":"AVAX/USD","symbol":"AVAX-USD","p":38,"d":2,"t":-1},
+]
+
+STOCKS_PAIRS = [
+    {"name":"Apple","symbol":"AAPL","p":189,"d":2,"t":1},
+    {"name":"Tesla","symbol":"TSLA","p":245,"d":2,"t":1},
+    {"name":"NVIDIA","symbol":"NVDA","p":875,"d":2,"t":1},
+    {"name":"Amazon","symbol":"AMZN","p":185,"d":2,"t":1},
+    {"name":"Google","symbol":"GOOGL","p":165,"d":2,"t":1},
+    {"name":"Microsoft","symbol":"MSFT","p":415,"d":2,"t":1},
+    {"name":"Meta","symbol":"META","p":510,"d":2,"t":1},
+    {"name":"Netflix","symbol":"NFLX","p":625,"d":2,"t":1},
+]
+
+ALL_PAIRS = {p["name"]: p for p in FOREX_PAIRS + OTC_PAIRS + CRYPTO_PAIRS + STOCKS_PAIRS}
 TIMEFRAMES = {"1":"1 хвилина","3":"3 хвилини","5":"5 хвилин","15":"15 хвилин","30":"30 хвилин","60":"1 година"}
+CRYPTO_TF  = {"5":"5 хвилин","15":"15 хвилин","30":"30 хвилин","60":"1 година","240":"4 години"}
+STOCKS_TF  = {"5":"5 хвилин","15":"15 хвилин","30":"30 хвилин","60":"1 година"}
 
 # ══════════════════════════════════════════
 #  СТАТИСТИКА (зберігається в пам'яті)
@@ -171,9 +198,9 @@ def calc_ema_cross(closes):
     return 1 if e9>e21 else -1
 
 def get_candles(symbol,tf,count=60):
-    tf_map={"1":"1m","3":"2m","5":"5m","15":"15m","30":"30m","60":"1h"}
+    tf_map={"1":"1m","3":"2m","5":"5m","15":"15m","30":"30m","60":"1h","240":"4h"}
     interval=tf_map.get(tf,"5m")
-    period="1d" if tf in ["1","3","5","15"] else "5d"
+    period="1d" if tf in ["1","3","5","15"] else ("60d" if tf=="240" else "5d")
     try:
         url=f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval={interval}&range={period}"
         r=requests.get(url,timeout=8,headers={"User-Agent":"Mozilla/5.0"})
@@ -270,14 +297,17 @@ def generate_signal(pair_name, tf):
 def format_signal(pair,tf,d):
     now_dt=datetime.now(timezone.utc)+timedelta(hours=2)
     now=now_dt.strftime("%H:%M:%S")
-    tf_hold={"1":(1,2),"3":(3,5),"5":(5,10),"15":(15,20),"30":(30,35),"60":(60,75)}
+    tf_hold={"1":(1,2),"3":(3,5),"5":(5,10),"15":(15,20),"30":(30,35),"60":(60,75),"240":(240,260)}
     hm=tf_hold.get(tf,(5,10))
     exp=(now_dt+timedelta(minutes=hm[0])).strftime("%H:%M")
     bar="█"*round(d["conf"]/10)+"░"*(10-round(d["conf"]/10))
     adw="" if d["adx_ok"] else "\n⚠️ _ADX<25 — тренд слабкий!_"
     vt="".join(f"{'🟢' if v[1]==1 else '🔴' if v[1]==-1 else '⚪'} {v[2]}\n" for v in d["votes"])
+    is_crypto = pair in [p['name'] for p in CRYPTO_PAIRS]
+    is_stocks = pair in [p['name'] for p in STOCKS_PAIRS]
+    mkt = '₿ КРИПТО' if is_crypto else ('📊 АКЦІЇ' if is_stocks else ('🌙 OTC' if d['is_otc'] else '📈 FOREX'))
     return f"""⚡ *AI SIGNAL BOT — Pocket Option*
-{'🌙 OTC' if d['is_otc'] else '📈 FOREX'} | {'🔴 Live' if d['real'] else '⚙️ Розрах'}
+{mkt} | {'🔴 Live' if d['real'] else '⚙️ Розрах'}
 
 *Пара:* `{pair}` | *ТФ:* `{TIMEFRAMES.get(tf,tf)}`
 *Час:* `{now}`
@@ -314,9 +344,23 @@ def main_kb():
     kb=InlineKeyboardMarkup(row_width=2)
     kb.add(InlineKeyboardButton("📈 FOREX",callback_data="menu_forex"),
            InlineKeyboardButton("🌙 OTC",callback_data="menu_otc"))
+    kb.add(InlineKeyboardButton("₿ КРИПТО",callback_data="menu_crypto"),
+           InlineKeyboardButton("📊 АКЦІЇ",callback_data="menu_stocks"))
     kb.add(InlineKeyboardButton("📊 Статистика",callback_data="stats"),
            InlineKeyboardButton("🕐 Сесії",callback_data="sessions"))
     kb.add(InlineKeyboardButton("ℹ️ Про бота",callback_data="about"))
+    return kb
+
+def crypto_kb():
+    kb=InlineKeyboardMarkup(row_width=2)
+    kb.add(*[InlineKeyboardButton(p["name"],callback_data=f"pair_{p['name']}") for p in CRYPTO_PAIRS])
+    kb.add(InlineKeyboardButton("◀️ Назад",callback_data="main"))
+    return kb
+
+def stocks_kb():
+    kb=InlineKeyboardMarkup(row_width=2)
+    kb.add(*[InlineKeyboardButton(p["name"],callback_data=f"pair_{p['name']}") for p in STOCKS_PAIRS])
+    kb.add(InlineKeyboardButton("◀️ Назад",callback_data="main"))
     return kb
 
 def forex_kb():
@@ -333,8 +377,12 @@ def otc_kb():
 
 def tf_kb(pair):
     kb=InlineKeyboardMarkup(row_width=3)
-    kb.add(*[InlineKeyboardButton(v,callback_data=f"tf|{pair}|{k}") for k,v in TIMEFRAMES.items()])
-    kb.add(InlineKeyboardButton("◀️ Назад",callback_data="otc_back" if "OTC" in pair else "forex_back"))
+    is_crypto = pair in [p["name"] for p in CRYPTO_PAIRS]
+    is_stocks = pair in [p["name"] for p in STOCKS_PAIRS]
+    tfs = CRYPTO_TF if is_crypto else (STOCKS_TF if is_stocks else TIMEFRAMES)
+    back = "crypto_back" if is_crypto else ("stocks_back" if is_stocks else ("otc_back" if "OTC" in pair else "forex_back"))
+    kb.add(*[InlineKeyboardButton(v,callback_data=f"tf|{pair}|{k}") for k,v in tfs.items()])
+    kb.add(InlineKeyboardButton("◀️ Назад",callback_data=back))
     return kb
 
 def result_kb(pair,tf):
@@ -381,11 +429,23 @@ def handle_callback(call):
         elif d=="menu_otc":
             bot.edit_message_text("🌙 *OTC пари*\nОберіть пару:",cid,mid,parse_mode="Markdown",reply_markup=otc_kb())
 
+        elif d=="menu_crypto":
+            bot.edit_message_text("₿ *Криптовалюти*\nОберіть пару:",cid,mid,parse_mode="Markdown",reply_markup=crypto_kb())
+
+        elif d=="menu_stocks":
+            bot.edit_message_text("📊 *Акції*\nОберіть актив:",cid,mid,parse_mode="Markdown",reply_markup=stocks_kb())
+
         elif d=="forex_back":
             bot.edit_message_text("📈 *FOREX пари*\nОберіть пару:",cid,mid,parse_mode="Markdown",reply_markup=forex_kb())
 
         elif d=="otc_back":
             bot.edit_message_text("🌙 *OTC пари*\nОберіть пару:",cid,mid,parse_mode="Markdown",reply_markup=otc_kb())
+
+        elif d=="crypto_back":
+            bot.edit_message_text("₿ *Криптовалюти*\nОберіть пару:",cid,mid,parse_mode="Markdown",reply_markup=crypto_kb())
+
+        elif d=="stocks_back":
+            bot.edit_message_text("📊 *Акції*\nОберіть актив:",cid,mid,parse_mode="Markdown",reply_markup=stocks_kb())
 
         elif d=="stats":
             bot.edit_message_text(stats_text(cid),cid,mid,parse_mode="Markdown",reply_markup=main_kb())
