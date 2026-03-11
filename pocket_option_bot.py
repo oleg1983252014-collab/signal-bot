@@ -79,8 +79,7 @@ STOCKS_TF  = {"5":"5 хвилин","15":"15 хвилин","30":"30 хвилин"
 # ══════════════════════════════════════════
 user_stats  = {}
 last_signal = {}   # зберігає останній сигнал для ML
-subscribers = {}   # {chat_id: {"active":True, "tf":"5", "min_conf":85, "last_sent":0}}
-scan_pairs  = [p["name"] for p in FOREX_PAIRS[:8]] + [p["name"] for p in CRYPTO_PAIRS[:4]]
+# Автосканування керується через auto_scan_settings і auto_scan_threads
 
 # Початкові ваги індикаторів (однакові для всіх)
 DEFAULT_WEIGHTS = {
@@ -699,8 +698,8 @@ def main_kb(cid=None):
     kb.add(InlineKeyboardButton("🤖 ML Навчання",callback_data="ml_status"),
            InlineKeyboardButton("ℹ️ Про бота",callback_data="about"))
     # Авто кнопка — показує статус
-    is_active = subscribers.get(cid,{}).get("active",False) if cid else False
-    auto_label = "🟢 АВТО: ВКЛ" if is_active else "🔴 АВТО: ВИКЛ"
+    is_active = auto_scan_settings.get(cid,{}).get("active",False) if cid else False
+    auto_label = "🟢 АВТО: ВКЛ ✅" if is_active else "🔴 АВТО: ВИКЛ"
     kb.add(InlineKeyboardButton(auto_label, callback_data="auto_menu"))
     return kb
 
@@ -803,53 +802,45 @@ def handle_callback(call):
             safe_edit(bot,cid,mid,ml_status_text(cid),main_kb(cid))
 
         elif d=="auto_menu":
-            if cid not in subscribers:
-                subscribers[cid]={"active":False,"tf":"5","min_conf":85,"last_sent":0}
-            safe_edit(bot,cid,mid,auto_menu_text(cid),sub_settings_kb(cid))
+            safe_edit(bot,cid,mid,auto_scan_text(cid),auto_scan_kb(cid))
 
-        elif d=="auto_start":
-            if cid not in subscribers:
-                subscribers[cid]={"active":False,"tf":"5","min_conf":85,"last_sent":0}
-            subscribers[cid]["active"]=True
-            subscribers[cid]["last_sent"]=0
-            tf=subscribers[cid].get("tf","5")
-            conf=subscribers[cid].get("min_conf",85)
+        elif d=="scan_start":
+            start_auto_scan(cid)
+            s=get_scan_settings(cid)
             bot.send_message(cid,
                 f"✅ *Автосканування запущено!*\n\n"
-                f"⏱ Таймфрейм: *{tf} хв*\n"
-                f"🎯 Мін. впевненість: *{conf}%*\n"
-                f"📡 Сканую *{len(scan_pairs)}* пар\n\n"
-                f"_Перший сигнал надійде через ~{tf} хв_\n"
-                f"_Тільки сигнали {conf}%+ впевненості_",
-                parse_mode="Markdown",reply_markup=sub_settings_kb(cid))
+                f"⏱ Таймфрейм: *{s['tf']} хв*\n"
+                f"🎯 Мін. впевненість: *{s['min_conf']}%*\n"
+                f"✅ Мін. голосів: *{s['min_votes']}/10*\n\n"
+                f"_Перший сигнал через ~{s['tf']} хв_",
+                parse_mode="Markdown", reply_markup=auto_scan_kb(cid))
 
-        elif d=="auto_stop":
-            if cid in subscribers:
-                subscribers[cid]["active"]=False
+        elif d=="scan_stop":
+            stop_auto_scan(cid)
             bot.send_message(cid,
-                "⏹ *Автосканування зупинено*\n\n"
-                "Натисніть ▶️ Запустити щоб увімкнути знову",
-                parse_mode="Markdown",reply_markup=main_kb(cid))
+                "⏹ *Автосканування зупинено*\n\nНатисніть ▶️ щоб увімкнути знову",
+                parse_mode="Markdown", reply_markup=main_kb(cid))
 
-        elif d=="auto_tf":
-            # Перемикаємо таймфрейм по колу
+        elif d=="scan_tf":
             tfs=["5","15","30","60"]
-            if cid not in subscribers:
-                subscribers[cid]={"active":False,"tf":"5","min_conf":85,"last_sent":0}
-            cur=subscribers[cid].get("tf","5")
-            idx=(tfs.index(cur)+1)%len(tfs) if cur in tfs else 0
-            subscribers[cid]["tf"]=tfs[idx]
-            safe_edit(bot,cid,mid,auto_menu_text(cid),sub_settings_kb(cid))
+            s=get_scan_settings(cid)
+            cur=s.get("tf","5")
+            s["tf"]=tfs[(tfs.index(cur)+1)%len(tfs) if cur in tfs else 0]
+            safe_edit(bot,cid,mid,auto_scan_text(cid),auto_scan_kb(cid))
 
-        elif d=="auto_conf":
-            # Перемикаємо мін. впевненість
+        elif d=="scan_conf":
             confs=[75,80,85,90,95]
-            if cid not in subscribers:
-                subscribers[cid]={"active":False,"tf":"5","min_conf":85,"last_sent":0}
-            cur=subscribers[cid].get("min_conf",85)
-            idx=(confs.index(cur)+1)%len(confs) if cur in confs else 2
-            subscribers[cid]["min_conf"]=confs[idx]
-            safe_edit(bot,cid,mid,auto_menu_text(cid),sub_settings_kb(cid))
+            s=get_scan_settings(cid)
+            cur=s.get("min_conf",85)
+            s["min_conf"]=confs[(confs.index(cur)+1)%len(confs) if cur in confs else 2]
+            safe_edit(bot,cid,mid,auto_scan_text(cid),auto_scan_kb(cid))
+
+        elif d=="scan_votes":
+            votes=[5,6,7,8,9]
+            s=get_scan_settings(cid)
+            cur=s.get("min_votes",7)
+            s["min_votes"]=votes[(votes.index(cur)+1)%len(votes) if cur in votes else 2]
+            safe_edit(bot,cid,mid,auto_scan_text(cid),auto_scan_kb(cid))
 
         elif d=="about":
             txt=("ℹ️ *AI Signal Bot v3*\n\n"
@@ -899,6 +890,7 @@ def handle_callback(call):
 # ══════════════════════════════════════════
 #  АВТОСКАНУВАННЯ
 # ══════════════════════════════════════════
+import threading
 
 auto_scan_settings = {}
 auto_scan_threads  = {}
@@ -906,87 +898,27 @@ auto_scan_threads  = {}
 def get_scan_settings(cid):
     if cid not in auto_scan_settings:
         auto_scan_settings[cid] = {
-            "active": False, "interval": 5,
-            "min_conf": 85,  "tf": "5", "min_votes": 7,
+            "active": False, "tf": "5",
+            "min_conf": 85,  "min_votes": 7,
         }
     return auto_scan_settings[cid]
 
-def scan_all_pairs(cid, settings):
-    tf = settings["tf"]
-    min_conf = settings["min_conf"]
-    min_votes = settings["min_votes"]
-    best = []
-    for pair_data in FOREX_PAIRS + OTC_PAIRS:
-        try:
-            sig = generate_signal(pair_data["name"], tf, cid=cid)
-            votes_for = sig["bc"] if sig["is_buy"] else sig["sc"]
-            if (sig["conf"] >= min_conf and
-                votes_for >= min_votes and
-                not sig.get("skip", False) and
-                sig.get("adx_ok", False)):
-                best.append((pair_data["name"], sig))
-        except Exception as e:
-            print(f"Scan error {pair_data['name']}: {e}")
-    best.sort(key=lambda x: x[1]["conf"], reverse=True)
-    return best[:3]
+def auto_scan_text(cid):
+    s = get_scan_settings(cid)
+    status   = "🟢 АКТИВНЕ" if s["active"] else "🔴 ВИМКНЕНО"
+    tf_name  = TIMEFRAMES.get(s["tf"], s["tf"])
+    n_pairs  = len(FOREX_PAIRS) + len(OTC_PAIRS) + len(CRYPTO_PAIRS[:4])
+    return (
+        f"🔍 *Автосканування*\n\n"
+        f"Статус: *{status}*\n"
+        f"⏱ Таймфрейм: *{tf_name}*\n"
+        f"🎯 Мін. впевненість: *{s['min_conf']}%*\n"
+        f"✅ Мін. підтверджень: *{s['min_votes']}/10*\n\n"
+        f"📊 Сканує: *{n_pairs} пар*\n\n"
+        f"_Бот надсилає тільки найкращі сигнали автоматично_"
+    )
 
-def auto_scan_loop(cid):
-    settings = get_scan_settings(cid)
-    print(f"🔄 Автосканування запущено для {cid}")
-    while settings.get("active", False):
-        try:
-            interval_sec = settings["interval"] * 60
-            tf = settings["tf"]
-            tf_name = TIMEFRAMES.get(tf, tf)
-            now_str = (datetime.now(timezone.utc)+timedelta(hours=2)).strftime("%H:%M")
-            bot.send_message(cid,
-                f"🔍 _Сканую {len(FOREX_PAIRS)+len(OTC_PAIRS)} пар на {tf_name}..._",
-                parse_mode="Markdown")
-            results = scan_all_pairs(cid, settings)
-            if not results:
-                bot.send_message(cid,
-                    f"😴 *{now_str}* — сильних сигналів немає\n"
-                    f"_Наступне через {settings['interval']} хв_",
-                    parse_mode="Markdown")
-            else:
-                bot.send_message(cid,
-                    f"🎯 *{now_str} — знайдено {len(results)} сигналів!*",
-                    parse_mode="Markdown")
-                for pair_name, sig in results:
-                    if cid not in last_signal:
-                        last_signal[cid] = {}
-                    last_signal[cid] = {
-                        "pair": pair_name, "tf": tf,
-                        "votes": sig.get("votes_raw", sig["votes"]),
-                        "conf": sig["conf"]
-                    }
-                    bot.send_message(cid, format_signal(pair_name, tf, sig),
-                                     parse_mode="Markdown", reply_markup=result_kb(pair_name, tf))
-                    time.sleep(1)
-            for _ in range(interval_sec // 60):
-                if not settings.get("active", False):
-                    break
-                time.sleep(60)
-        except Exception as e:
-            print(f"AutoScan error: {e}")
-            time.sleep(30)
-    print(f"Автосканування зупинено для {cid}")
-
-def start_auto_scan(cid):
-    settings = get_scan_settings(cid)
-    settings["active"] = True
-    old = auto_scan_threads.get(cid)
-    if old and old.is_alive():
-        pass
-    t = threading.Thread(target=auto_scan_loop, args=(cid,), daemon=True)
-    auto_scan_threads[cid] = t
-    t.start()
-
-def stop_auto_scan(cid):
-    settings = get_scan_settings(cid)
-    settings["active"] = False
-
-def auto_scan_menu_kb(cid):
+def auto_scan_kb(cid):
     s = get_scan_settings(cid)
     tf_name = TIMEFRAMES.get(s["tf"], s["tf"])
     kb = InlineKeyboardMarkup(row_width=2)
@@ -995,39 +927,99 @@ def auto_scan_menu_kb(cid):
     else:
         kb.add(InlineKeyboardButton("▶️ ЗАПУСТИТИ", callback_data="scan_start"))
     kb.add(
-        InlineKeyboardButton(f"⏱ ТФ: {tf_name}", callback_data="scan_tf"),
-        InlineKeyboardButton(f"🔁 {s['interval']} хв", callback_data="scan_interval"),
+        InlineKeyboardButton(f"⏱ ТФ: {tf_name}",       callback_data="scan_tf"),
+        InlineKeyboardButton(f"🎯 Мін: {s['min_conf']}%", callback_data="scan_conf"),
     )
     kb.add(
-        InlineKeyboardButton(f"🎯 Мін {s['min_conf']}%", callback_data="scan_conf"),
-        InlineKeyboardButton(f"✅ Мін {s['min_votes']}/10", callback_data="scan_votes"),
+        InlineKeyboardButton(f"✅ Голосів: {s['min_votes']}+", callback_data="scan_votes"),
+        InlineKeyboardButton("◀️ Меню",                  callback_data="main"),
     )
-    kb.add(InlineKeyboardButton("◀️ Меню", callback_data="main"))
     return kb
 
-def auto_scan_text(cid):
-    s = get_scan_settings(cid)
-    status = "🟢 АКТИВНЕ" if s["active"] else "🔴 ВИМКНЕНО"
-    tf_name = TIMEFRAMES.get(s["tf"], s["tf"])
-    pairs_count = len(FOREX_PAIRS) + len(OTC_PAIRS)
-    return (
-        f"🔍 *Автосканування*\n\n"
-        f"Статус: *{status}*\n"
-        f"⏱ Таймфрейм: *{tf_name}*\n"
-        f"🔁 Інтервал: *кожні {s['interval']} хв*\n"
-        f"🎯 Мін. впевненість: *{s['min_conf']}%*\n"
-        f"✅ Мін. підтверджень: *{s['min_votes']}/10*\n\n"
-        f"📊 Сканує: *{pairs_count} пар*\n\n"
-        f"_Бот надсилає тільки найкращі сигнали автоматично_"
+def autosignal_kb(pair, tf):
+    kb = InlineKeyboardMarkup(row_width=2)
+    kb.add(
+        InlineKeyboardButton("✅ Виграш",    callback_data=f"win|{pair}|{tf}"),
+        InlineKeyboardButton("❌ Програш",   callback_data=f"loss|{pair}|{tf}"),
     )
+    kb.add(InlineKeyboardButton("⏹ Зупинити авто", callback_data="scan_stop"))
+    return kb
+
+def scan_all_pairs(cid, settings):
+    tf        = settings["tf"]
+    min_conf  = settings["min_conf"]
+    min_votes = settings["min_votes"]
+    all_pairs = FOREX_PAIRS + OTC_PAIRS + CRYPTO_PAIRS[:4]
+    best = []
+    for p in all_pairs:
+        try:
+            sig = generate_signal(p["name"], tf, cid=cid)
+            votes_for = sig["bc"] if sig["is_buy"] else sig["sc"]
+            if (sig["conf"] >= min_conf and
+                votes_for >= min_votes and
+                not sig.get("skip", False) and
+                sig.get("adx_ok", False)):
+                best.append((p["name"], sig))
+        except Exception as e:
+            print(f"Scan {p['name']}: {e}")
+    best.sort(key=lambda x: x[1]["conf"], reverse=True)
+    return best[:3]
+
+def auto_scan_loop(cid):
+    settings = get_scan_settings(cid)
+    print(f"🔄 Авто для {cid}")
+    while settings.get("active", False):
+        try:
+            tf       = settings["tf"]
+            tf_name  = TIMEFRAMES.get(tf, tf)
+            now_str  = (datetime.now(timezone.utc)+timedelta(hours=2)).strftime("%H:%M")
+            n_pairs  = len(FOREX_PAIRS)+len(OTC_PAIRS)+len(CRYPTO_PAIRS[:4])
+            results  = scan_all_pairs(cid, settings)
+            if not results:
+                bot.send_message(cid,
+                    f"🔍 *{now_str}* — сканував {n_pairs} пар\n"
+                    f"😴 Сильних сигналів немає (мін {settings['min_conf']}%)\n"
+                    f"_Наступне через {tf} хв_",
+                    parse_mode="Markdown")
+            else:
+                bot.send_message(cid,
+                    f"🎯 *{now_str} — знайдено {len(results)} сигнал(и)!*",
+                    parse_mode="Markdown")
+                for pair_name, sig in results:
+                    last_signal[cid] = {
+                        "pair": pair_name, "tf": tf,
+                        "votes": sig.get("votes_raw", sig["votes"]),
+                        "conf":  sig["conf"]
+                    }
+                    bot.send_message(cid, format_signal(pair_name, tf, sig),
+                        parse_mode="Markdown", reply_markup=autosignal_kb(pair_name, tf))
+                    time.sleep(1)
+            # Чекаємо інтервал (перевіряємо кожну хвилину)
+            interval_min = int(tf)
+            for _ in range(interval_min):
+                if not settings.get("active", False): break
+                time.sleep(60)
+        except Exception as e:
+            print(f"AutoScan err: {e}")
+            time.sleep(30)
+    print(f"Авто зупинено для {cid}")
+
+def start_auto_scan(cid):
+    s = get_scan_settings(cid)
+    s["active"] = True
+    old = auto_scan_threads.get(cid)
+    if old and old.is_alive():
+        return  # вже працює
+    t = threading.Thread(target=auto_scan_loop, args=(cid,), daemon=True)
+    auto_scan_threads[cid] = t
+    t.start()
+
+def stop_auto_scan(cid):
+    get_scan_settings(cid)["active"] = False
 
 # ══════════════════════════════════════════
 #  ЗАПУСК
 # ══════════════════════════════════════════
 if __name__=="__main__":
-    import threading
-    print("✅ AI Signal Bot v3 + Автосканування запущено!")
-    # Запустити автосканування в окремому потоці
-    scan_thread = threading.Thread(target=auto_scan_loop, daemon=True)
-    scan_thread.start()
+    print("✅ AI Signal Bot v3 + ML + Автосканування запущено!")
     bot.infinity_polling()
