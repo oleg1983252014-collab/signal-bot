@@ -779,18 +779,18 @@ def format_signal(pair,tf,d):
 # ══════════════════════════════════════════
 def main_kb(cid=None):
     kb=InlineKeyboardMarkup(row_width=2)
-    kb.add(InlineKeyboardButton("📈 FOREX",callback_data="menu_forex"),
-           InlineKeyboardButton("🌙 OTC",callback_data="menu_otc"))
-    kb.add(InlineKeyboardButton("₿ КРИПТО",callback_data="menu_crypto"),
-           InlineKeyboardButton("📊 АКЦІЇ",callback_data="menu_stocks"))
-    kb.add(InlineKeyboardButton("📊 Статистика",callback_data="stats"),
-           InlineKeyboardButton("🕐 Сесії",callback_data="sessions"))
-    kb.add(InlineKeyboardButton("🤖 ML Навчання",callback_data="ml_status"),
-           InlineKeyboardButton("ℹ️ Про бота",callback_data="about"))
-    # Авто кнопка — показує статус
+    kb.add(InlineKeyboardButton("📈 FOREX",    callback_data="menu_forex"),
+           InlineKeyboardButton("🌙 OTC",      callback_data="menu_otc"))
+    kb.add(InlineKeyboardButton("₿ КРИПТО",   callback_data="menu_crypto"),
+           InlineKeyboardButton("📊 АКЦІЇ",    callback_data="menu_stocks"))
+    # Авто кнопка на видному місці
     is_active = auto_scan_settings.get(cid,{}).get("active",False) if cid else False
-    auto_label = "🟢 АВТО: ВКЛ ✅" if is_active else "🔴 АВТО: ВИКЛ"
-    kb.add(InlineKeyboardButton(auto_label, callback_data="auto_menu"))
+    auto_label = "🟢 АВТО ВКЛ ✅" if is_active else "🔴 АВТО ВИКЛ"
+    kb.add(InlineKeyboardButton(auto_label,    callback_data="auto_menu"))
+    kb.add(InlineKeyboardButton("📊 Статистика",callback_data="stats"),
+           InlineKeyboardButton("🕐 Сесії",    callback_data="sessions"))
+    kb.add(InlineKeyboardButton("🤖 ML",       callback_data="ml_status"),
+           InlineKeyboardButton("ℹ️ Про бота", callback_data="about"))
     return kb
 
 def crypto_kb():
@@ -839,7 +839,20 @@ def result_kb(pair,tf):
 #  ХЕНДЛЕРИ
 # ══════════════════════════════════════════
 def send_main(cid, mid=None):
-    txt="⚡ *AI Signal Bot — Pocket Option*\n\nОберіть категорію:"
+    txt=(
+        "⚡ *AI Signal Bot v3 — Pocket Option*\n\n"
+        "• RSI • MACD • EMA 9/21/50\n"
+        "• Ichimoku Cloud\n"
+        "• ADX фільтр\n"
+        "• Stochastic • Bollinger Bands\n"
+        "• Williams %R • CCI\n"
+        "• Wave Trend • Pivot Points\n"
+        "• MTF • Патерни • S/R рівні\n"
+        "• 🤖 ML навчання\n\n"
+        "📊 *14 індикаторів одночасно*\n"
+        "📡 Yahoo Finance API | UTC+2\n\n"
+        "Оберіть категорію:"
+    )
     if mid:
         try: bot.edit_message_text(txt,cid,mid,parse_mode="Markdown",reply_markup=main_kb(cid)); return
         except: pass
@@ -933,12 +946,25 @@ def handle_callback(call):
             safe_edit(bot,cid,mid,auto_scan_text(cid),auto_scan_kb(cid))
 
         elif d=="about":
-            txt=("ℹ️ *AI Signal Bot v3*\n\n"
-                 "• RSI, MACD, EMA 9/21/50\n• Ichimoku Cloud\n• ADX фільтр\n"
-                 "• Stochastic, Bollinger Bands\n• MTF аналіз\n• Патерни свічок\n"
-                 "• Рівні підтримки/опору\n• Обсяг торгів\n\n"
-                 "📡 Yahoo Finance API | UTC+2")
-            safe_edit(bot,cid,mid,txt,main_kb())
+            txt=(
+                "ℹ️ *AI Signal Bot v3*\n\n"
+                "• RSI • MACD • EMA 9/21/50\n"
+                "• Ichimoku Cloud\n"
+                "• ADX фільтр (тренд)\n"
+                "• Stochastic • Bollinger Bands\n"
+                "• MTF мультитаймфрейм\n"
+                "• Патерни свічок (7 типів)\n"
+                "• Рівні підтримки/опору\n"
+                "• Обсяг торгів\n"
+                "• Williams %R\n"
+                "• CCI (Commodity Channel)\n"
+                "• Wave Trend Oscillator\n"
+                "• Pivot Points (R1/R2/S1/S2)\n"
+                "• ML навчання на вашій статистиці\n\n"
+                "📊 *14 індикаторів одночасно*\n"
+                "📡 Yahoo Finance API | UTC+2"
+            )
+            safe_edit(bot,cid,mid,txt,main_kb(cid))
         elif d.startswith("pair_"):
             pair=d[5:]
             safe_edit(bot,cid,mid,f"⏱ *Таймфрейм для {pair}*\nОберіть:",tf_kb(pair))
