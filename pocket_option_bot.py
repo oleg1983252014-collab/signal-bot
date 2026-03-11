@@ -83,9 +83,10 @@ last_signal = {}   # зберігає останній сигнал для ML
 
 # Початкові ваги індикаторів (однакові для всіх)
 DEFAULT_WEIGHTS = {
-    "RSI": 1.0, "MACD": 1.0, "EMA Cross": 1.0,
-    "Ichimoku": 1.0, "Stoch": 1.0, "BB": 1.0,
-    "EMA50": 1.0, "MTF": 1.2, "Обсяг": 0.8, "Патерн": 0.9
+    "RSI": 1.0, "MACD": 1.1, "EMA Cross": 1.1,
+    "Ichimoku": 1.0, "Stoch": 0.9, "BB": 0.9,
+    "EMA50": 0.8, "MTF": 1.3, "Обсяг": 0.8, "Патерн": 1.0,
+    "Williams%R": 1.1, "CCI": 1.0, "WaveTrend": 1.2, "Pivot": 1.1
 }
 
 def get_stats(cid):
@@ -454,6 +455,69 @@ def nearest_sr(price, resistances, supports, decimals):
             round(near_sup,decimals) if near_sup else None,
             sr_warn)
 
+
+# ══════════════════════════════════════════
+#  НОВІ ТОЧНІ ІНДИКАТОРИ
+# ══════════════════════════════════════════
+def calc_williams_r(closes, highs, lows, period=14):
+    """Williams %R — точніший для розворотів"""
+    if len(closes)<period: return -50
+    hh=max(highs[-period:]); ll=min(lows[-period:])
+    if hh==ll: return -50
+    return round((hh-closes[-1])/(hh-ll)*-100, 1)
+
+def calc_cci(closes, highs, lows, period=20):
+    """CCI — Commodity Channel Index"""
+    if len(closes)<period: return 0
+    tp=[(highs[i]+lows[i]+closes[i])/3 for i in range(-period,0)]
+    sma=sum(tp)/period
+    mad=sum(abs(x-sma) for x in tp)/period
+    if mad==0: return 0
+    return round((tp[-1]-sma)/(0.015*mad), 1)
+
+def calc_wave_trend(closes, n1=10, n2=21):
+    """Wave Trend Oscillator"""
+    if len(closes)<n2+n1: return 0,0
+    # EMA апроксимація
+    esa=calc_ema(closes,n1)
+    diff=[abs(closes[i]-calc_ema(closes[:i+1],n1)) for i in range(len(closes))]
+    if len(diff)<n1: return 0,0
+    d=calc_ema(diff,n1)
+    if d==0: return 0,0
+    ci=[(closes[i]-calc_ema(closes[:i+1],n1))/(0.015*max(calc_ema(diff[:i+1],n1),1e-9))
+        for i in range(n1,len(closes))]
+    if len(ci)<n2: return 0,0
+    wt1=calc_ema(ci,n2)
+    wt1_prev=calc_ema(ci[:-1],n2) if len(ci)>n2 else wt1
+    return round(wt1,2),round(wt1_prev,2)
+
+def calc_pivot_points(highs,lows,closes):
+    """Класичні Pivot Points"""
+    if len(closes)<2: return None
+    n=min(len(highs),len(lows),24)
+    ph=max(highs[-n:]); pl=min(lows[-n:]); pc=closes[-1]
+    pp=round((ph+pl+pc)/3,6)
+    return {"pp":pp,"r1":round(2*pp-pl,6),"r2":round(pp+(ph-pl),6),
+            "s1":round(2*pp-ph,6),"s2":round(pp-(ph-pl),6)}
+
+def pivot_signal(price, pivots):
+    """Сигнал від Pivot Points"""
+    if not pivots: return 0,"Pivot: н/д"
+    pp=pivots["pp"]; r1=pivots["r1"]; s1=pivots["s1"]
+    tol=abs(r1-pp)*0.15
+    if price>r1:
+        return -1,f"Pivot: вище R1={pivots['r1']} — ведмежий"
+    elif price>pp and abs(price-r1)<tol:
+        return -1,f"Pivot: біля R1 ⚠️ опір"
+    elif price>pp:
+        return 1,f"Pivot: вище PP={pp} ✅ бичачий"
+    elif price<s1:
+        return 1,f"Pivot: нижче S1={pivots['s1']} — перепроданість ✅"
+    elif price<pp and abs(price-s1)<tol:
+        return 1,f"Pivot: біля S1 ⚠️ підтримка"
+    else:
+        return -1,f"Pivot: нижче PP={pp} — ведмежий"
+
 # ══════════════════════════════════════════
 #  ГЕНЕРАЦІЯ СИГНАЛУ v3 (MTF + S/R + Patterns + Volume)
 # ══════════════════════════════════════════
@@ -470,12 +534,18 @@ def generate_signal(pair_name, tf, cid=None):
         bb=calc_bb(closes); ichi=calc_ichimoku(closes,highs,lows)
         ec=calc_ema_cross(closes)
         e9=calc_ema(closes,9); e21=calc_ema(closes,21); e50=calc_ema(closes,50)
-        # Нові
+        # S/R + Volume + Patterns + MTF
         resistances,supports=calc_support_resistance(highs,lows,closes)
         vol_score,vol_desc=calc_volume_signal(volumes)
         pat_score,pat_desc=calc_candle_patterns(closes,highs,lows)
         mtf_score,mtf_desc=calc_mtf(m["symbol"],tf)
         nr,ns,sr_warn=nearest_sr(live,resistances,supports,m["d"])
+        # Нові точні індикатори
+        wpr=calc_williams_r(closes,highs,lows)
+        cci=calc_cci(closes,highs,lows)
+        wt1,wt1_prev=calc_wave_trend(closes)
+        pivots=calc_pivot_points(highs,lows,closes)
+        piv_score,piv_desc=pivot_signal(live,pivots)
     else:
         seed=sum(ord(c) for c in pair_name)+int(tf)+int(time.time()//60)
         r=lambda i:seeded_rand(seed,i)
@@ -485,6 +555,9 @@ def generate_signal(pair_name, tf, cid=None):
         resistances=[]; supports=[]; vol_score=0; vol_desc="Обсяг н/д"
         pat_score=0; pat_desc="Патернів не виявлено"; mtf_score=m["t"]; mtf_desc="MTF розрахунковий"
         nr=None; ns=None; sr_warn=""
+        wpr=round(-50+r(10)*50); cci=round(-50+r(11)*100)
+        wt1=r(12)*100-50; wt1_prev=r(13)*100-50
+        pivots=None; piv_score=m["t"]; piv_desc="Pivot розрахунковий"
 
     votes=[]
     # 1. RSI
@@ -529,6 +602,25 @@ def generate_signal(pair_name, tf, cid=None):
     if pat_score>0:   votes.append(("Патерн",1,pat_desc))
     elif pat_score<0: votes.append(("Патерн",-1,pat_desc))
     else:             votes.append(("Патерн",0,pat_desc))
+    # 11. Williams %R
+    if wpr<-80:   votes.append(("Williams%R",1,f"W%R={wpr} перепроданість ✅"))
+    elif wpr>-20: votes.append(("Williams%R",-1,f"W%R={wpr} перекупленість ✅"))
+    elif wpr<-50: votes.append(("Williams%R",1,f"W%R={wpr} нахил вгору"))
+    else:         votes.append(("Williams%R",-1,f"W%R={wpr} нахил вниз"))
+    # 12. CCI
+    if cci<-100:  votes.append(("CCI",1,f"CCI={cci} перепроданість ✅"))
+    elif cci>100: votes.append(("CCI",-1,f"CCI={cci} перекупленість ✅"))
+    elif cci>0:   votes.append(("CCI",-1,f"CCI={cci} ведмежий нахил"))
+    else:         votes.append(("CCI",1,f"CCI={cci} бичачий нахил"))
+    # 13. Wave Trend
+    wt_cross_up   = wt1>wt1_prev and wt1_prev<-60
+    wt_cross_down = wt1<wt1_prev and wt1_prev>60
+    if wt_cross_up:    votes.append(("WaveTrend",1,"WT перетин ▲ із зони перепроданості ✅"))
+    elif wt_cross_down:votes.append(("WaveTrend",-1,"WT перетин ▼ із зони перекупленості ✅"))
+    elif wt1>0:        votes.append(("WaveTrend",-1,f"WT={wt1} у зоні перекупленості"))
+    else:              votes.append(("WaveTrend",1,f"WT={wt1} у зоні перепроданості"))
+    # 14. Pivot Points
+    votes.append(("Pivot", piv_score, piv_desc))
 
     # ══ ML ВАГИ — застосовуємо навчені ваги ══
     weights = get_weights(cid) if cid else DEFAULT_WEIGHTS
@@ -590,7 +682,8 @@ def generate_signal(pair_name, tf, cid=None):
                 nr=nr,ns=ns,sr_warn=sr_warn,pat_desc=pat_desc,
                 mtf_desc=mtf_desc,vol_desc=vol_desc,
                 total_votes=tv,mtf_ok=mtf_ok,pat_ok=pat_ok,
-                votes_raw=votes,weighted_score=round(weighted_score,2))
+                votes_raw=votes,weighted_score=round(weighted_score,2),
+                wpr=wpr,cci=cci,wt1=wt1,piv_desc=piv_desc)
 
 def format_signal(pair,tf,d):
     now_dt=datetime.now(timezone.utc)+timedelta(hours=2)
