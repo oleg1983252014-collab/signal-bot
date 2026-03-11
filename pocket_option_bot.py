@@ -571,64 +571,53 @@ def cmd_stats(msg):
 def cmd_sessions(msg):
     bot.send_message(msg.chat.id,sessions_text(),parse_mode="Markdown",reply_markup=main_kb())
 
+def safe_edit(bot, cid, mid, text, markup=None):
+    try:
+        bot.edit_message_text(text, cid, mid, parse_mode="Markdown", reply_markup=markup)
+    except Exception as e:
+        if "not modified" in str(e) or "400" in str(e):
+            try:
+                bot.edit_message_text(text+" ", cid, mid, parse_mode="Markdown", reply_markup=markup)
+            except:
+                bot.send_message(cid, text, parse_mode="Markdown", reply_markup=markup)
+        else:
+            bot.send_message(cid, text, parse_mode="Markdown", reply_markup=markup)
+
 @bot.callback_query_handler(func=lambda c: True)
 def handle_callback(call):
     cid=call.message.chat.id; mid=call.message.message_id; d=call.data
-
+    bot.answer_callback_query(call.id)
     try:
         if d=="main":
             send_main(cid,mid)
-
-        elif d=="menu_forex":
-            bot.edit_message_text("📈 *FOREX пари*\nОберіть пару:",cid,mid,parse_mode="Markdown",reply_markup=forex_kb())
-
-        elif d=="menu_otc":
-            bot.edit_message_text("🌙 *OTC пари*\nОберіть пару:",cid,mid,parse_mode="Markdown",reply_markup=otc_kb())
-
-        elif d=="menu_crypto":
-            bot.edit_message_text("₿ *Криптовалюти*\nОберіть пару:",cid,mid,parse_mode="Markdown",reply_markup=crypto_kb())
-
-        elif d=="menu_stocks":
-            bot.edit_message_text("📊 *Акції*\nОберіть актив:",cid,mid,parse_mode="Markdown",reply_markup=stocks_kb())
-
-        elif d=="forex_back":
-            bot.edit_message_text("📈 *FOREX пари*\nОберіть пару:",cid,mid,parse_mode="Markdown",reply_markup=forex_kb())
-
-        elif d=="otc_back":
-            bot.edit_message_text("🌙 *OTC пари*\nОберіть пару:",cid,mid,parse_mode="Markdown",reply_markup=otc_kb())
-
-        elif d=="crypto_back":
-            bot.edit_message_text("₿ *Криптовалюти*\nОберіть пару:",cid,mid,parse_mode="Markdown",reply_markup=crypto_kb())
-
-        elif d=="stocks_back":
-            bot.edit_message_text("📊 *Акції*\nОберіть актив:",cid,mid,parse_mode="Markdown",reply_markup=stocks_kb())
-
+        elif d in ("menu_forex","forex_back"):
+            safe_edit(bot,cid,mid,"📈 *FOREX пари*\nОберіть пару:",forex_kb())
+        elif d in ("menu_otc","otc_back"):
+            safe_edit(bot,cid,mid,"🌙 *OTC пари*\nОберіть пару:",otc_kb())
+        elif d in ("menu_crypto","crypto_back"):
+            safe_edit(bot,cid,mid,"₿ *Криптовалюти*\nОберіть пару:",crypto_kb())
+        elif d in ("menu_stocks","stocks_back"):
+            safe_edit(bot,cid,mid,"📊 *Акції*\nОберіть актив:",stocks_kb())
         elif d=="stats":
-            bot.edit_message_text(stats_text(cid),cid,mid,parse_mode="Markdown",reply_markup=main_kb())
-
+            safe_edit(bot,cid,mid,stats_text(cid),main_kb())
         elif d=="sessions":
-            bot.edit_message_text(sessions_text(),cid,mid,parse_mode="Markdown",reply_markup=main_kb())
-
+            safe_edit(bot,cid,mid,sessions_text(),main_kb())
         elif d=="about":
-            txt=("ℹ️ *AI Signal Bot*\n\n"
+            txt=("ℹ️ *AI Signal Bot v3*\n\n"
                  "• RSI, MACD, EMA 9/21/50\n• Ichimoku Cloud\n• ADX фільтр\n"
-                 "• Stochastic, Bollinger Bands\n• 7 індикаторів одночасно\n\n"
+                 "• Stochastic, Bollinger Bands\n• MTF аналіз\n• Патерни свічок\n"
+                 "• Рівні підтримки/опору\n• Обсяг торгів\n\n"
                  "📡 Yahoo Finance API | UTC+2")
-            bot.edit_message_text(txt,cid,mid,parse_mode="Markdown",reply_markup=main_kb())
-
+            safe_edit(bot,cid,mid,txt,main_kb())
         elif d.startswith("pair_"):
             pair=d[5:]
-            bot.edit_message_text(f"⏱ *Таймфрейм для {pair}*\nОберіть:",cid,mid,
-                                   parse_mode="Markdown",reply_markup=tf_kb(pair))
-
+            safe_edit(bot,cid,mid,f"⏱ *Таймфрейм для {pair}*\nОберіть:",tf_kb(pair))
         elif d.startswith("tf|"):
             _,pair,tf=d.split("|",2)
-            bot.answer_callback_query(call.id,"⚡ Аналізую...")
             bot.edit_message_text(f"⏳ Аналізую *{pair}*...",cid,mid,parse_mode="Markdown")
             sig=generate_signal(pair,tf)
             bot.edit_message_text(format_signal(pair,tf,sig),cid,mid,
                                    parse_mode="Markdown",reply_markup=result_kb(pair,tf))
-
         elif d.startswith("win|") or d.startswith("loss|"):
             res,pair,tf=d.split("|",2)
             s=get_stats(cid); s["total"]+=1
@@ -640,10 +629,8 @@ def handle_callback(call):
             s["pairs"][pair]["total"]+=1
             if res=="win": s["pairs"][pair]["wins"]+=1
             wr=round(s["wins"]/s["total"]*100)
-            bot.answer_callback_query(call.id,f"{emoji} WR: {wr}%")
-            bot.send_message(cid,f"{emoji}\n\n📊 WR: *{wr}%* ({s['wins']}W/{s['losses']}L)\n\nОберіть наступну дію:",
+            bot.send_message(cid,f"{emoji}\n\n📊 WR: *{wr}%* ({s['wins']}W/{s['losses']}L)\n\nОберіть дію:",
                              parse_mode="Markdown",reply_markup=main_kb())
-
     except Exception as e:
         print(f"Помилка: {e}")
         bot.send_message(cid,"Оберіть категорію:",reply_markup=main_kb())
