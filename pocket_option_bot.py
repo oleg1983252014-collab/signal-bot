@@ -631,38 +631,35 @@ def generate_signal(pair_name, tf, cid=None):
     score = weighted_score; is_buy = score >= 0
     tv=len(votes)
 
-    # ══ ЖОРСТКІ ФІЛЬТРИ ══
-    adx_ok   = adx>=30              # Підвищено з 25 до 30
+    # ══ ФІЛЬТРИ (без блокування) ══
+    adx_ok   = adx>=25
     mtf_ok   = (mtf_score==1 and is_buy) or (mtf_score==-1 and not is_buy)
     pat_ok   = (pat_score>0 and is_buy) or (pat_score<0 and not is_buy)
-    sr_block = bool(sr_warn)        # Ціна біля S/R — блокуємо
 
-    # Бонуси
-    mtf_bonus = 6 if mtf_ok else -4          # MTF не збігається — штраф
+    # Бонуси і штрафи (впливають на % але не блокують)
+    mtf_bonus = 5 if mtf_ok else -3
     pat_bonus = 4 if pat_ok else 0
     adx_bonus = round(min(adx/100,.15)*10)
 
-    conf=min(97,round(66+min(abs(score)/tv,1)*24+adx_bonus+(5 if adx_ok else 0)+mtf_bonus+pat_bonus))
+    conf=min(97,round(66+min(abs(score)/tv,1)*24+adx_bonus+(4 if adx_ok else 0)+mtf_bonus+pat_bonus))
 
     sc2=max(bc,sc)
+    skip=False  # Блокування вимкнено — показуємо всі сигнали
 
-    # ══ РІВНІ СИЛИ (жорсткіші пороги) ══
-    if sc2<5 or not adx_ok:
-        conf=min(conf,72); strength="⛔ ПРОПУСТІТЬ"
-        skip=True
-    elif sc2<7 or not mtf_ok:
-        conf=min(conf,83); strength="⚠️ СЛАБКИЙ — обережно"
-        skip=False
-    elif sc2<9:
-        conf=min(conf,91); strength="✅ СЕРЕДНІЙ"
-        skip=False
+    # ══ РІВНІ СИЛИ ══
+    if sc2<4:
+        conf=min(conf,72); strength="⚠️ СЛАБКИЙ"
+    elif sc2<7:
+        conf=min(conf,84); strength="✅ СЕРЕДНІЙ"
+    elif sc2<10:
+        conf=min(conf,92); strength="🔥 СИЛЬНИЙ"
     else:
-        strength="🔥 СИЛЬНИЙ — входити!"; skip=False
+        strength="🔥🔥 ДУЖЕ СИЛЬНИЙ"
 
-    # S/R блокує сигнал
-    if sr_block:
-        conf=max(55,conf-10)
-        if skip==False and sc2<8: strength="⚠️ S/R блокує — ризик"
+    # S/R — попередження але не блокування
+    if sr_warn:
+        conf=max(55,conf-8)
+        if sc2<8: strength+=" ⚠️S/R"
 
     d=m["d"]; mult=1 if live>100 else(.01 if live>10 else .0001)
     atr=sum(abs(closes[i]-closes[i-1]) for i in range(-10,0))/10 if real and len(closes)>=10 else mult*3
