@@ -460,7 +460,11 @@ def format_signal(pair,tf,d):
     is_crypto = pair in [p['name'] for p in CRYPTO_PAIRS]
     is_stocks = pair in [p['name'] for p in STOCKS_PAIRS]
     mkt = '₿ КРИПТО' if is_crypto else ('📊 АКЦІЇ' if is_stocks else ('🌙 OTC' if d['is_otc'] else '📈 FOREX'))
-    return f"""⚡ *AI SIGNAL BOT — Pocket Option*
+    tv  = d.get('total_votes', 7)
+    sr_line = f"\n{d['sr_warn']}" if d.get('sr_warn') else ""
+    nr_line = f"🔴 Опір:       `{d['nr']}`\n" if d.get('nr') else ""
+    ns_line = f"🟢 Підтримка:  `{d['ns']}`\n" if d.get('ns') else ""
+    return f"""⚡ *AI SIGNAL BOT v3 — Pocket Option*
 {mkt} | {'🔴 Live' if d['real'] else '⚙️ Розрах'}
 
 *Пара:* `{pair}` | *ТФ:* `{TIMEFRAMES.get(tf,tf)}`
@@ -475,19 +479,17 @@ def format_signal(pair,tf,d):
 
 📊 *Впевненість: {d['conf']}%*
 `{bar}`
-✅ BUY: `{d['bc']}/7` | 🔴 SELL: `{d['sc']}/7`
-📐 ADX={d['adx']} {'💪' if d['adx_ok'] else '⚠️'}{adw}
+✅ BUY: `{d['bc']}/{tv}` | 🔴 SELL: `{d['sc']}/{tv}`
+📐 ADX={d['adx']} {'💪' if d['adx_ok'] else '⚠️'}{adw}{sr_line}
 
-💰 *Рівні*
-Ціна: `{d['live']}` | Вхід: `{d['live']}`
+💰 *Рівні входу*
+Вхід: `{d['live']}` | SL: `{d['sl']}` | R/R: `1:{d['rr']}`
 TP1: `{d['tp1']}` | TP2: `{d['tp2']}`
-SL: `{d['sl']}` | R/R: `1:{d['rr']}`
-🔴 Опір: `{d['res']}` | 🟢 Підтримка: `{d['sup']}`
-
+{nr_line}{ns_line}
 📉 EMA9:`{d['e9']}` EMA21:`{d['e21']}` EMA50:`{d['e50']}`
 
 ━━━━━━━━━━━━━━━━━━━━
-🔬 *7 індикаторів:*
+🔬 *{tv} індикаторів + MTF + Патерни:*
 {vt}
 ⚠️ _Не є фінансовою порадою_""".strip()
 
