@@ -316,7 +316,52 @@ def calc_ema_cross(closes):
     if e9<e21 and e9p>=e21p: return -2
     return 1 if e9>e21 else -1
 
-def get_candles(symbol,tf,count=60):
+FINNHUB_KEY = os.environ.get("FINNHUB_KEY", "d6omma1r01qi5kh3hgu0d6omma1r01qi5kh3hgug")
+FINNHUB_URL = "https://finnhub.io/api/v1"
+
+# Маппінг символів для Finnhub
+def to_finnhub_symbol(symbol):
+    """Конвертує Yahoo символ у Finnhub формат"""
+    # Forex: EURUSD=X -> OANDA:EUR_USD
+    if symbol.endswith("=X"):
+        base = symbol[:-2]
+        if len(base)==6:
+            return f"OANDA:{base[:3]}_{base[3:]}", "forex"
+    # Крипто: BTC-USD -> BINANCE:BTCUSDT
+    if "-USD" in symbol:
+        coin = symbol.replace("-USD","")
+        return f"BINANCE:{coin}USDT", "crypto"
+    # Акції: AAPL -> AAPL
+    return symbol, "stock"
+
+def get_candles_finnhub(symbol, tf, count=60):
+    """Отримати свічки через Finnhub API (реальний час)"""
+    tf_map = {"1":"1","3":"5","5":"5","15":"15","30":"30","60":"60","240":"D"}
+    resolution = tf_map.get(tf,"5")
+    finn_sym, market = to_finnhub_symbol(symbol)
+    now = int(time.time())
+    # Визначити діапазон
+    bars_needed = count * int(tf if tf.isdigit() and tf!="240" else "1440") * 60
+    from_ts = now - bars_needed * 3
+    try:
+        url = f"{FINNHUB_URL}/stock/candle?symbol={finn_sym}&resolution={resolution}&from={from_ts}&to={now}&token={FINNHUB_KEY}"
+        if market == "forex":
+            url = f"{FINNHUB_URL}/forex/candle?symbol={finn_sym}&resolution={resolution}&from={from_ts}&to={now}&token={FINNHUB_KEY}"
+        elif market == "crypto":
+            url = f"{FINNHUB_URL}/crypto/candle?symbol={finn_sym}&resolution={resolution}&from={from_ts}&to={now}&token={FINNHUB_KEY}"
+        r = requests.get(url, timeout=8)
+        data = r.json()
+        if data.get("s") != "ok" or not data.get("c"):
+            return [], [], [], []
+        c = data["c"]; h = data["h"]; l = data["l"]
+        v = data.get("v", [0]*len(c))
+        n = min(len(c),len(h),len(l),len(v),count)
+        return c[-n:], h[-n:], l[-n:], v[-n:]
+    except:
+        return [], [], [], []
+
+def get_candles_yahoo(symbol, tf, count=60):
+    """Fallback: Yahoo Finance"""
     tf_map={"1":"1m","3":"2m","5":"5m","15":"15m","30":"30m","60":"1h","240":"4h"}
     interval=tf_map.get(tf,"5m")
     period="1d" if tf in ["1","3","5","15"] else ("60d" if tf=="240" else "5d")
@@ -333,12 +378,46 @@ def get_candles(symbol,tf,count=60):
         return c[-n:],h[-n:],l[-n:],v[-n:]
     except: return [],[],[],[]
 
-def get_price(symbol,fallback):
+def get_candles(symbol, tf, count=60):
+    """Спочатку Finnhub (точніший), потім Yahoo як fallback"""
+    c,h,l,v = get_candles_finnhub(symbol, tf, count)
+    if len(c) >= 10:
+        return c,h,l,v
+    # Fallback на Yahoo
+    return get_candles_yahoo(symbol, tf, count)
+
+def get_price_finnhub(symbol):
+    """Реальна ціна через Finnhub"""
+    finn_sym, market = to_finnhub_symbol(symbol)
+    try:
+        if market == "forex":
+            url = f"{FINNHUB_URL}/forex/rates?base=USD&token={FINNHUB_KEY}"
+            # Для forex використаємо quote
+            url = f"{FINNHUB_URL}/quote?symbol={finn_sym}&token={FINNHUB_KEY}"
+        elif market == "crypto":
+            url = f"{FINNHUB_URL}/quote?symbol={finn_sym}&token={FINNHUB_KEY}"
+        else:
+            url = f"{FINNHUB_URL}/quote?symbol={finn_sym}&token={FINNHUB_KEY}"
+        r = requests.get(url, timeout=5)
+        data = r.json()
+        price = data.get("c") or data.get("price")
+        if price and float(price) > 0:
+            return float(price)
+        return None
+    except:
+        return None
+
+def get_price(symbol, fallback):
+    """Спочатку Finnhub, потім Yahoo"""
+    price = get_price_finnhub(symbol)
+    if price:
+        return price
     try:
         url=f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval=1m&range=1d"
         r=requests.get(url,timeout=5,headers={"User-Agent":"Mozilla/5.0"})
         return float(r.json()["chart"]["result"][0]["meta"]["regularMarketPrice"])
-    except: return fallback
+    except:
+        return fallback
 
 # ══════════════════════════════════════════
 #  НОВІ ІНДИКАТОРИ
@@ -850,7 +929,7 @@ def send_main(cid, mid=None):
         "• MTF • Патерни • S/R рівні\n"
         "• 🤖 ML навчання\n\n"
         "📊 *14 індикаторів одночасно*\n"
-        "📡 Yahoo Finance API | UTC+2\n\n"
+        "📡 Finnhub + Yahoo API | UTC+2\n\n"
         "Оберіть категорію:"
     )
     if mid:
@@ -962,7 +1041,7 @@ def handle_callback(call):
                 "• Pivot Points (R1/R2/S1/S2)\n"
                 "• ML навчання на вашій статистиці\n\n"
                 "📊 *14 індикаторів одночасно*\n"
-                "📡 Yahoo Finance API | UTC+2"
+                "📡 Finnhub (реальний час) + Yahoo | UTC+2"
             )
             safe_edit(bot,cid,mid,txt,main_kb(cid))
         elif d.startswith("pair_"):
