@@ -206,9 +206,13 @@ def get_candles(symbol,tf,count=60):
         r=requests.get(url,timeout=8,headers={"User-Agent":"Mozilla/5.0"})
         res=r.json()["chart"]["result"][0]
         q=res["indicators"]["quote"][0]
-        c=[x for x in q["close"] if x]; h=[x for x in q["high"] if x]; l=[x for x in q["low"] if x]
-        return c[-count:],h[-count:],l[-count:]
-    except: return [],[],[]
+        c=[x for x in q["close"] if x]
+        h=[x for x in q["high"]  if x]
+        l=[x for x in q["low"]   if x]
+        v=[x for x in (q.get("volume") or [0]*len(c)) if x is not None]
+        n=min(len(c),len(h),len(l),len(v),count)
+        return c[-n:],h[-n:],l[-n:],v[-n:]
+    except: return [],[],[],[]
 
 def get_price(symbol,fallback):
     try:
@@ -218,66 +222,211 @@ def get_price(symbol,fallback):
     except: return fallback
 
 # ══════════════════════════════════════════
-#  ГЕНЕРАЦІЯ СИГНАЛУ
+#  НОВІ ІНДИКАТОРИ
+# ══════════════════════════════════════════
+def calc_support_resistance(highs, lows, closes, n=20):
+    """Знаходить сильні рівні підтримки та опору"""
+    if len(closes) < n: return [],[]
+    window=5
+    resistance_levels=[]
+    support_levels=[]
+    for i in range(window, len(highs)-window):
+        if highs[i]==max(highs[i-window:i+window+1]):
+            resistance_levels.append(highs[i])
+        if lows[i]==min(lows[i-window:i+window+1]):
+            support_levels.append(lows[i])
+    # Кластеризуємо близькі рівні
+    def cluster(levels, tol=0.002):
+        if not levels: return []
+        levels=sorted(set(levels))
+        clusters=[[levels[0]]]
+        for lv in levels[1:]:
+            if (lv-clusters[-1][-1])/clusters[-1][-1]<tol:
+                clusters[-1].append(lv)
+            else:
+                clusters.append([lv])
+        return [sum(c)/len(c) for c in clusters]
+    return cluster(resistance_levels), cluster(support_levels)
+
+def calc_volume_signal(volumes):
+    """Аналіз обсягу торгів"""
+    if len(volumes)<10: return 0,"Обсяг н/д"
+    avg_vol=sum(volumes[-10:])/10
+    curr_vol=volumes[-1]
+    ratio=curr_vol/avg_vol if avg_vol>0 else 1
+    if ratio>1.5:   return 1, f"Обсяг +{round((ratio-1)*100)}% ✅ сильний сигнал"
+    elif ratio>1.1: return 0.5, f"Обсяг +{round((ratio-1)*100)}% нормальний"
+    else:           return -0.5, f"Обсяг низький ⚠️"
+
+def calc_candle_patterns(closes, highs, lows):
+    """Патерни свічок"""
+    if len(closes)<3: return 0,""
+    o1,h1,l1,c1 = closes[-3],highs[-3],lows[-3],closes[-3]
+    o2,h2,l2,c2 = closes[-2],highs[-2],lows[-2],closes[-2]
+    o3,h3,l3,c3 = closes[-1],highs[-1],lows[-1],closes[-1]
+    body2=abs(c2-o2); body3=abs(c3-o3)
+    range2=h2-l2 if h2!=l2 else 0.0001
+
+    patterns=[]
+
+    # Doji
+    if body3<range2*0.1:
+        patterns.append((0,"🕯 Doji — невизначеність"))
+
+    # Hammer (молоток) — бичачий розворот
+    lower_wick=o3-l3 if c3>o3 else c3-l3
+    upper_wick=h3-c3 if c3>o3 else h3-o3
+    if lower_wick>body3*2 and upper_wick<body3*0.5 and body3>0:
+        patterns.append((1,"🔨 Hammer — бичачий розворот ✅"))
+
+    # Shooting Star — ведмежий розворот
+    if upper_wick>body3*2 and lower_wick<body3*0.5 and body3>0:
+        patterns.append((-1,"⭐ Shooting Star — ведмежий розворот ✅"))
+
+    # Bullish Engulfing
+    if c2<o2 and c3>o3 and c3>o2 and o3<c2:
+        patterns.append((1,"🟢 Bullish Engulfing ✅"))
+
+    # Bearish Engulfing
+    if c2>o2 and c3<o3 and c3<o2 and o3>c2:
+        patterns.append((-1,"🔴 Bearish Engulfing ✅"))
+
+    # Three White Soldiers
+    if c1>o1 and c2>o2 and c3>o3 and c3>c2>c1:
+        patterns.append((1,"💪 Three White Soldiers ✅"))
+
+    # Three Black Crows
+    if c1<o1 and c2<o2 and c3<o3 and c3<c2<c1:
+        patterns.append((-1,"🐦 Three Black Crows ✅"))
+
+    if not patterns: return 0,"Патернів не виявлено"
+    score=sum(p[0] for p in patterns)
+    desc=" | ".join(p[1] for p in patterns)
+    return score, desc
+
+def calc_mtf(symbol, tf):
+    """Мультитаймфреймний аналіз — старший ТФ"""
+    tf_up={"1":"5","3":"15","5":"15","15":"60","30":"60","60":"240","240":"240"}
+    higher_tf=tf_up.get(tf,tf)
+    if higher_tf==tf: return 0,"MTF: н/д"
+    c,h,l,v=get_candles(symbol,higher_tf,30)
+    if len(c)<20: return 0,"MTF: недостатньо даних"
+    # Простий тренд на старшому ТФ
+    ema9 =calc_ema(c,9)
+    ema21=calc_ema(c,21)
+    rsi  =calc_rsi(c)
+    tf_names={"5":"5хв","15":"15хв","60":"1год","240":"4год"}
+    tf_name=tf_names.get(higher_tf,higher_tf+"хв")
+    if ema9>ema21 and rsi>50:
+        return 1, f"MTF {tf_name}: бичачий тренд ✅"
+    elif ema9<ema21 and rsi<50:
+        return -1, f"MTF {tf_name}: ведмежий тренд ✅"
+    return 0, f"MTF {tf_name}: нейтраль"
+
+def nearest_sr(price, resistances, supports, decimals):
+    """Знаходить найближчі рівні S/R та відстань до них"""
+    near_res = min(resistances, key=lambda x: abs(x-price)) if resistances else None
+    near_sup = min(supports,    key=lambda x: abs(x-price)) if supports    else None
+    sr_warn=""
+    if near_res and abs(near_res-price)/price<0.003:
+        sr_warn=f"⚠️ Ціна біля сильного ОПОРУ ({round(near_res,decimals)})"
+    elif near_sup and abs(near_sup-price)/price<0.003:
+        sr_warn=f"⚠️ Ціна біля сильної ПІДТРИМКИ ({round(near_sup,decimals)})"
+    return (round(near_res,decimals) if near_res else None,
+            round(near_sup,decimals) if near_sup else None,
+            sr_warn)
+
+# ══════════════════════════════════════════
+#  ГЕНЕРАЦІЯ СИГНАЛУ v3 (MTF + S/R + Patterns + Volume)
 # ══════════════════════════════════════════
 def generate_signal(pair_name, tf):
     m=ALL_PAIRS.get(pair_name,FOREX_PAIRS[0])
     is_otc="OTC" in pair_name
-    closes,highs,lows=get_candles(m["symbol"],tf,60)
+    closes,highs,lows,volumes=get_candles(m["symbol"],tf,60)
     live=get_price(m["symbol"],m["p"])
     real=len(closes)>=20
+
     if real:
         rsi=calc_rsi(closes); adx=calc_adx(closes,highs,lows)
         macd,mh=calc_macd(closes); stoch=calc_stoch(closes,highs,lows)
         bb=calc_bb(closes); ichi=calc_ichimoku(closes,highs,lows)
         ec=calc_ema_cross(closes)
         e9=calc_ema(closes,9); e21=calc_ema(closes,21); e50=calc_ema(closes,50)
+        # Нові
+        resistances,supports=calc_support_resistance(highs,lows,closes)
+        vol_score,vol_desc=calc_volume_signal(volumes)
+        pat_score,pat_desc=calc_candle_patterns(closes,highs,lows)
+        mtf_score,mtf_desc=calc_mtf(m["symbol"],tf)
+        nr,ns,sr_warn=nearest_sr(live,resistances,supports,m["d"])
     else:
         seed=sum(ord(c) for c in pair_name)+int(tf)+int(time.time()//60)
         r=lambda i:seeded_rand(seed,i)
         rsi=round(28+r(1)*50); adx=round(22+r(2)*55); macd=(r(3)-.5)*.006; mh=macd*.3
         stoch=round(15+r(5)*70); bb=r(4)*100; ichi=m["t"]; ec=m["t"]
         e9=live*(1+(r(7)-.5)*.002); e21=live*(1+(r(8)-.5)*.003); e50=live*(1+(r(9)-.5)*.005)
+        resistances=[]; supports=[]; vol_score=0; vol_desc="Обсяг н/д"
+        pat_score=0; pat_desc="Патернів не виявлено"; mtf_score=m["t"]; mtf_desc="MTF розрахунковий"
+        nr=None; ns=None; sr_warn=""
 
     votes=[]
+    # 1. RSI
     if rsi<30:    votes.append(("RSI",1,f"RSI={rsi} перепроданість ✅"))
     elif rsi>70:  votes.append(("RSI",-1,f"RSI={rsi} перекупленість ✅"))
     elif rsi<45:  votes.append(("RSI",1,f"RSI={rsi} бичачий нахил"))
     elif rsi>55:  votes.append(("RSI",-1,f"RSI={rsi} ведмежий нахил"))
     else:         votes.append(("RSI",0,f"RSI={rsi} нейтраль"))
-
-    if macd>0 and mh>0:   votes.append(("MACD",1,"MACD ▲ BUY підтверджено ✅"))
-    elif macd<0 and mh<0: votes.append(("MACD",-1,"MACD ▼ SELL підтверджено ✅"))
+    # 2. MACD
+    if macd>0 and mh>0:   votes.append(("MACD",1,"MACD ▲ BUY ✅"))
+    elif macd<0 and mh<0: votes.append(("MACD",-1,"MACD ▼ SELL ✅"))
     else:                  votes.append(("MACD",0,"MACD нейтральний"))
-
-    if ec==2:    votes.append(("EMA Cross",1,"EMA 9/21 перетин ▲ СИЛЬНИЙ BUY ✅"))
-    elif ec==-2: votes.append(("EMA Cross",-1,"EMA 9/21 перетин ▼ СИЛЬНИЙ SELL ✅"))
+    # 3. EMA Cross
+    if ec==2:    votes.append(("EMA Cross",1,"EMA 9/21 ▲ СИЛЬНИЙ BUY ✅"))
+    elif ec==-2: votes.append(("EMA Cross",-1,"EMA 9/21 ▼ СИЛЬНИЙ SELL ✅"))
     elif ec==1:  votes.append(("EMA Cross",1,"EMA 9>21 бичачий тренд"))
     else:        votes.append(("EMA Cross",-1,"EMA 9<21 ведмежий тренд"))
+    # 4. Ichimoku
+    if ichi==1:    votes.append(("Ichimoku",1,"Ціна над хмарою ☁️ BUY ✅"))
+    elif ichi==-1: votes.append(("Ichimoku",-1,"Ціна під хмарою ☁️ SELL ✅"))
+    else:          votes.append(("Ichimoku",0,"Ichimoku нейтраль"))
+    # 5. Stochastic
+    if stoch<20:   votes.append(("Stoch",1,f"Stoch={stoch} перепроданість ✅"))
+    elif stoch>80: votes.append(("Stoch",-1,f"Stoch={stoch} перекупленість ✅"))
+    else:          votes.append(("Stoch",0,f"Stoch={stoch} нейтраль"))
+    # 6. Bollinger Bands
+    if bb<15:      votes.append(("BB",1,"Ціна біля нижньої смуги ✅"))
+    elif bb>85:    votes.append(("BB",-1,"Ціна біля верхньої смуги ✅"))
+    else:          votes.append(("BB",0,f"BB позиція {bb:.0f}%"))
+    # 7. EMA50
+    if live>e50:   votes.append(("EMA50",1,"Ціна вище EMA50 — висхідний тренд"))
+    else:          votes.append(("EMA50",-1,"Ціна нижче EMA50 — низхідний тренд"))
+    # 8. MTF
+    if mtf_score==1:    votes.append(("MTF",1,mtf_desc))
+    elif mtf_score==-1: votes.append(("MTF",-1,mtf_desc))
+    else:               votes.append(("MTF",0,mtf_desc))
+    # 9. Обсяг
+    if vol_score>=1:     votes.append(("Обсяг",1,vol_desc))
+    elif vol_score<=-0.5:votes.append(("Обсяг",-1,vol_desc))
+    else:                votes.append(("Обсяг",0,vol_desc))
+    # 10. Патерни
+    if pat_score>0:   votes.append(("Патерн",1,pat_desc))
+    elif pat_score<0: votes.append(("Патерн",-1,pat_desc))
+    else:             votes.append(("Патерн",0,pat_desc))
 
-    if ichi==1:   votes.append(("Ichimoku",1,"Ціна над хмарою ☁️ BUY ✅"))
-    elif ichi==-1:votes.append(("Ichimoku",-1,"Ціна під хмарою ☁️ SELL ✅"))
-    else:         votes.append(("Ichimoku",0,"Ichimoku нейтраль"))
-
-    if stoch<20:  votes.append(("Stoch",1,f"Stoch={stoch} перепроданість ✅"))
-    elif stoch>80:votes.append(("Stoch",-1,f"Stoch={stoch} перекупленість ✅"))
-    else:         votes.append(("Stoch",0,f"Stoch={stoch} нейтраль"))
-
-    if bb<15:     votes.append(("BB",1,"Ціна біля нижньої смуги ✅"))
-    elif bb>85:   votes.append(("BB",-1,"Ціна біля верхньої смуги ✅"))
-    else:         votes.append(("BB",0,f"BB позиція {bb:.0f}%"))
-
-    if live>e50:  votes.append(("EMA50",1,"Ціна вище EMA50 — висхідний тренд"))
-    else:         votes.append(("EMA50",-1,"Ціна нижче EMA50 — низхідний тренд"))
-
-    bc=sum(1 for v in votes if v[1]==1); sc=sum(1 for v in votes if v[1]==-1)
+    bc=sum(1 for v in votes if v[1]==1)
+    sc=sum(1 for v in votes if v[1]==-1)
     score=bc-sc; is_buy=score>=0
     adx_ok=adx>=25
-    conf=min(97,round(70+min(abs(score)/7,1)*20+(min(adx/100,.15)*10)+(5 if adx_ok else 0)))
+    # Бонус за підтвердження MTF і патернів
+    mtf_bonus=5 if (mtf_score==1 and is_buy) or (mtf_score==-1 and not is_buy) else 0
+    pat_bonus=3 if (pat_score>0 and is_buy) or (pat_score<0 and not is_buy) else 0
+    conf=min(97,round(68+min(abs(score)/10,1)*22+(min(adx/100,.12)*8)+(4 if adx_ok else 0)+mtf_bonus+pat_bonus))
     sc2=max(bc,sc)
-    if sc2<3:   conf=min(conf,78); strength="⚠️ СЛАБКИЙ"
-    elif sc2<5: conf=min(conf,88); strength="✅ СЕРЕДНІЙ"
+    if sc2<4:   conf=min(conf,78); strength="⚠️ СЛАБКИЙ"
+    elif sc2<7: conf=min(conf,89); strength="✅ СЕРЕДНІЙ"
     else:       strength="🔥 СИЛЬНИЙ"
+
+    # Попередження S/R знижує впевненість
+    if sr_warn: conf=max(60,conf-8)
 
     d=m["d"]; mult=1 if live>100 else(.01 if live>10 else .0001)
     atr=sum(abs(closes[i]-closes[i-1]) for i in range(-10,0))/10 if real and len(closes)>=10 else mult*3
@@ -285,14 +434,19 @@ def generate_signal(pair_name, tf):
     tp1=round(live+atr*1.5,d) if is_buy else round(live-atr*1.5,d)
     tp2=round(live+atr*2.5,d) if is_buy else round(live-atr*2.5,d)
     sl =round(live-atr*sp,d)  if is_buy else round(live+atr*sp,d)
-    res=round(live+atr*3,d); sup=round(live-atr*3,d)
     rr =round(abs(tp1-live)/abs(sl-live),1) if abs(sl-live)>0 else 1.5
+    # TP/SL прив'язані до рівнів S/R
+    if is_buy and nr: tp1=round(min(tp1,nr*0.999),d)
+    if not is_buy and ns: tp1=round(max(tp1,ns*1.001),d)
 
     return dict(is_buy=is_buy,signal="BUY ▲" if is_buy else "SELL ▼",conf=conf,
-                strength=strength,live=live,tp1=tp1,tp2=tp2,sl=sl,res=res,sup=sup,rr=rr,
+                strength=strength,live=live,tp1=tp1,tp2=tp2,sl=sl,rr=rr,
                 rsi=rsi,adx=adx,adx_ok=adx_ok,macd=macd,stoch=stoch,bb=bb,
                 e9=round(e9,d),e21=round(e21,d),e50=round(e50,d),
-                votes=votes,bc=bc,sc=sc,real=real,is_otc=is_otc)
+                votes=votes,bc=bc,sc=sc,real=real,is_otc=is_otc,
+                nr=nr,ns=ns,sr_warn=sr_warn,pat_desc=pat_desc,
+                mtf_desc=mtf_desc,vol_desc=vol_desc,
+                total_votes=len(votes))
 
 def format_signal(pair,tf,d):
     now_dt=datetime.now(timezone.utc)+timedelta(hours=2)
