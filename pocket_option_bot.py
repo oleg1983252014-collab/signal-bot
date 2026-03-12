@@ -356,10 +356,10 @@ def get_candles_yahoo(symbol,tf,count=80):
     return [],[],[],[]
 
 def get_candles(symbol,tf,count=80):
-    c,h,l,v=get_candles_finnhub(symbol,tf,count)
+    # 1. TwelveData — основний (800/день)
+    c,h,l,v=get_candles_twelve(symbol,tf,count)
     if len(c)>=15: return c,h,l,v
-    c,h,l,v=get_candles_alpha(symbol,tf,count)
-    if len(c)>=15: return c,h,l,v
+    # 2. Yahoo — резерв
     c,h,l,v=get_candles_yahoo(symbol,tf,count)
     return c,h,l,v
 
