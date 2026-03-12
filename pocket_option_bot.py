@@ -729,12 +729,15 @@ def do_signal(cid, mid, pair, tf):
         ("⟳ Обробка індикаторів...","▰▰▰▰▰▰▱▱▱▱ 60%"),
         ("⟳ Генерую сигнал...","▰▰▰▰▰▰▰▰▰▱ 90%"),
     ]
+    last_text = ""
     for step,bar in steps:
         try:
-            bot.edit_message_text(
-                f"🔵 *SIGNAL AI* 🔵\n\n{step}\n\n`{pair}` | `{tfs_label}`\n\n{bar}",
-                cid,mid,parse_mode="Markdown")
-        except: pass
+            new_text = f"🔵 *SIGNAL AI* 🔵\n\n{step}\n\n`{pair}` | `{tfs_label}`\n\n{bar}"
+            if new_text != last_text:
+                bot.edit_message_text(new_text, cid, mid, parse_mode="Markdown")
+                last_text = new_text
+        except Exception as e:
+            if "not modified" not in str(e): pass
         time.sleep(0.8)
 
     sig=generate_signal(pair,tf)
@@ -827,4 +830,9 @@ def handle_callback(call):
 # ══════════════════════════════════════════
 if __name__=="__main__":
     print("✅ SIGNAL AI Bot запущено!")
-    bot.infinity_polling(timeout=30,long_polling_timeout=20)
+    # Скидаємо webhook і старі з'єднання перед стартом
+try:
+    bot.delete_webhook(drop_pending_updates=True)
+    time.sleep(1)
+except: pass
+bot.infinity_polling(timeout=30, long_polling_timeout=20, skip_pending=True)
