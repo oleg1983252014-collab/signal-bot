@@ -296,11 +296,12 @@ def get_candles_finnhub(symbol,tf,count=80):
         ep={"forex":"forex/candle","crypto":"crypto/candle","stock":"stock/candle"}[mkt]
         url=f"{FINNHUB_URL}/{ep}?symbol={finn}&resolution={res}&from={from_ts}&to={now}&token={FINNHUB_KEY}"
         r=requests.get(url,timeout=8); d=r.json()
+        print(f"[FINNHUB] {finn} s={d.get('s')} n={len(d.get('c',[]))}")
         if d.get("s")!="ok" or not d.get("c"): return [],[],[],[]
         c=d["c"]; h=d["h"]; l=d["l"]; v=d.get("v",[])
         n=min(len(c),len(h),len(l),count)
         return c[-n:],h[-n:],l[-n:],(v[-n:] if v else [])
-    except: return [],[],[],[]
+    except Exception as e: print(f"[FINNHUB ERR] {e}"); return [],[],[],[]
 
 def get_candles_alpha(symbol,tf,count=80):
     tf_map={"1":"1min","5":"5min","15":"15min","30":"30min","60":"60min"}
@@ -313,13 +314,16 @@ def get_candles_alpha(symbol,tf,count=80):
                 url=f"{ALPHA_URL}?function=FX_INTRADAY&from_symbol={fs}&to_symbol={ts}&interval={interval}&outputsize=compact&apikey={ALPHA_KEY}"
                 r=requests.get(url,timeout=10); data=r.json()
                 key=f"Time Series FX ({interval})"
-                if key not in data: return [],[],[],[]
+                if key not in data:
+                    print(f"[ALPHA FX] key not found, keys={list(data.keys())}")
+                    return [],[],[],[]
                 items=list(data[key].items())[:count]; items.reverse()
                 c=[float(v["4. close"]) for _,v in items]
                 h=[float(v["2. high"])  for _,v in items]
                 l=[float(v["3. low"])   for _,v in items]
+                print(f"[ALPHA FX] {symbol} n={len(c)}")
                 return c,h,l,[]
-            except: return [],[],[],[]
+            except Exception as e: print(f"[ALPHA FX ERR] {e}"); return [],[],[],[]
     if not symbol.endswith("=X") and "-USD" not in symbol:
         try:
             url=f"{ALPHA_URL}?function=TIME_SERIES_INTRADAY&symbol={symbol}&interval={interval}&outputsize=compact&apikey={ALPHA_KEY}"
@@ -339,26 +343,29 @@ def get_candles_yahoo(symbol,tf,count=80):
     tf_map={"1":"1m","5":"5m","15":"15m","30":"30m","60":"1h","240":"4h"}
     interval=tf_map.get(tf,"5m")
     period="1d" if tf in ["1","5","15"] else "5d"
-    try:
-        url=f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval={interval}&range={period}"
-        r=requests.get(url,timeout=8,headers={"User-Agent":"Mozilla/5.0"})
-        res=r.json()["chart"]["result"][0]
-        q=res["indicators"]["quote"][0]
-        c=[x for x in q["close"] if x]
-        h=[x for x in q["high"]  if x]
-        l=[x for x in q["low"]   if x]
-        v=[x for x in q.get("volume",[]) if x]
-        n=min(len(c),len(h),len(l),count)
-        return c[-n:],h[-n:],l[-n:],(v[-n:] if len(v)>=n else [])
-    except: return [],[],[],[]
+    for yhost in ["query1","query2"]:
+        try:
+            url=f"https://{yhost}.finance.yahoo.com/v8/finance/chart/{symbol}?interval={interval}&range={period}"
+            r=requests.get(url,timeout=8,headers={"User-Agent":"Mozilla/5.0"})
+            res=r.json()["chart"]["result"][0]
+            q=res["indicators"]["quote"][0]
+            c=[x for x in q["close"] if x]
+            h=[x for x in q["high"]  if x]
+            l=[x for x in q["low"]   if x]
+            v=[x for x in q.get("volume",[]) if x]
+            n=min(len(c),len(h),len(l),count)
+            print(f"[YAHOO/{yhost}] {symbol} n={n}")
+            return c[-n:],h[-n:],l[-n:],(v[-n:] if len(v)>=n else [])
+        except Exception as e: print(f"[YAHOO/{yhost} ERR] {e}")
+    return [],[],[],[]
 
 def get_candles(symbol,tf,count=80):
     c,h,l,v=get_candles_finnhub(symbol,tf,count)
     if len(c)>=15: return c,h,l,v
     c,h,l,v=get_candles_alpha(symbol,tf,count)
     if len(c)>=15: return c,h,l,v
-    c,h,l=get_candles_yahoo(symbol,tf,count)
-    return c,h,l,[]
+    c,h,l,v=get_candles_yahoo(symbol,tf,count)
+    return c,h,l,v
 
 def get_price(symbol,fallback):
     finn,_=to_finnhub(symbol)
@@ -383,24 +390,46 @@ def generate_signal(pair_name, tf):
     live=get_price(m["symbol"],m["p"])
     real=len(closes)>=15
 
-    # ── КРИТИЧНО: без реальних даних — повертаємо None (fix #1) ──
+    # ── Якщо немає реальних даних — розрахунковий режим (позначається ⚙️) ──
     if not real:
-        return None
-
-    # Розраховуємо всі індикатори
-    rsi   = calc_rsi(closes)
-    macd, mh = calc_macd(closes)
-    ec    = calc_ema_cross(closes)
-    stoch = calc_stoch(closes,highs,lows)
-    bb    = calc_bb(closes)
-    adx   = calc_adx(closes,highs,lows)
-    willr = calc_williams_r(closes,highs,lows)   # НОВИЙ
-    candle= calc_candlestick(closes,highs,lows)   # НОВИЙ
-    vol_t = calc_volume_trend(volumes)            # НОВИЙ
-
-    e9 =calc_ema(closes,9)  or live
-    e21=calc_ema(closes,21) or live
-    e50=calc_ema(closes,50) or live
+        print(f"[FALLBACK] {pair_name} tf={tf} — API не відповів, розрахунковий режим")
+        seed=sum(ord(ch) for ch in pair_name)+int(tf)+int(time.time()//300)
+        def sr(i):
+            x=math.sin(seed+i)*43758.5453123; return x-math.floor(x)
+        rsi   = round(25+sr(1)*50)
+        adx   = round(20+sr(2)*50); adx_ok=adx>=25
+        macd_v= (sr(3)-.5)*.004; mh=macd_v*.4
+        stoch = round(15+sr(5)*70)
+        bb    = sr(4)*100
+        willr = round(-80+sr(6)*60)
+        ec    = 2 if sr(7)>0.6 else(-2 if sr(7)<0.4 else 1)
+        candle= 0; vol_t=0
+        e9 =live*(1+(sr(8)-.5)*.001)
+        e21=live*(1+(sr(9)-.5)*.002)
+        e50=live*(1+(sr(10)-.5)*.003)
+        closes=[live*(1+(sr(i+20)-.5)*.002) for i in range(30)]
+        highs =[c*(1+sr(i+50)*.001) for i,c in enumerate(closes)]
+        lows  =[c*(1-sr(i+70)*.001) for i,c in enumerate(closes)]
+        volumes=[]
+        macd=macd_v
+        mh_val=mh
+    else:
+        # Розраховуємо всі індикатори з реальних даних
+        rsi   = calc_rsi(closes)
+        macd_v, mh_val = calc_macd(closes)
+        macd  = macd_v
+        mh    = mh_val
+        ec    = calc_ema_cross(closes)
+        stoch = calc_stoch(closes,highs,lows)
+        bb    = calc_bb(closes)
+        adx   = calc_adx(closes,highs,lows) or 20
+        adx_ok= adx>=25
+        willr = calc_williams_r(closes,highs,lows)
+        candle= calc_candlestick(closes,highs,lows)
+        vol_t = calc_volume_trend(volumes)
+        e9 =calc_ema(closes,9)  or live
+        e21=calc_ema(closes,21) or live
+        e50=calc_ema(closes,50) or live
 
     votes=[]
 
