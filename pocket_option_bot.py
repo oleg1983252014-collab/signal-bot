@@ -406,13 +406,10 @@ def generate_signal(pair_name, tf):
         lows  =[c*(1-sr(i+70)*.001) for i,c in enumerate(closes)]
         volumes=[]
         macd=macd_v
-        mh_val=mh
     else:
         # Розраховуємо всі індикатори з реальних даних
         rsi   = calc_rsi(closes)
-        macd_v, mh_val = calc_macd(closes)
-        macd  = macd_v
-        mh    = mh_val
+        macd, mh = calc_macd(closes)
         ec    = calc_ema_cross(closes)
         stoch = calc_stoch(closes,highs,lows)
         bb    = calc_bb(closes)
@@ -700,7 +697,7 @@ def send_main(cid,mid=None):
          "• RSI • MACD • EMA • Williams %R\n"
          "• Stochastic • BB • ADX\n"
          "• Свічкові патерни • Об'єм\n\n"
-         "📡 *Finnhub + Alpha Vantage + Yahoo*\n"
+         "📡 *TwelveData + Yahoo Finance*\n"
          "🎯 *Точність сигналів: ~82-95%*\n\n"
          "╚══ Оберіть категорію ══╝")
     if mid:
@@ -790,8 +787,7 @@ def handle_callback(call):
                  "• Свічкові патерни\n"
                  "• Аналіз об'єму\n\n"
                  "*API:*\n"
-                 "• Finnhub (реальний час)\n"
-                 "• Alpha Vantage (1хв Forex)\n"
+                 "• TwelveData (основний, 800/день)\n"
                  "• Yahoo Finance (резерв)\n\n"
                  "🎯 Точність: ~82-95%\n"
                  "📊 Forex • OTC • Крипто • Акції")
@@ -828,9 +824,8 @@ def handle_callback(call):
 # ══════════════════════════════════════════
 if __name__=="__main__":
     print("✅ SIGNAL AI Bot запущено!")
-    # Скидаємо webhook і старі з'єднання перед стартом
-try:
-    bot.delete_webhook(drop_pending_updates=True)
-    time.sleep(1)
-except: pass
-bot.infinity_polling(timeout=30, long_polling_timeout=20, skip_pending=True)
+    try:
+        bot.delete_webhook(drop_pending_updates=True)
+        time.sleep(1)
+    except: pass
+    bot.infinity_polling(timeout=30, long_polling_timeout=20, skip_pending=True)
