@@ -71,7 +71,7 @@ STOCKS_PAIRS = [
     {"name":"Netflix","symbol":"NFLX","p":625,"d":2},
 ]
 ALL_PAIRS   = {p["name"]: p for p in FOREX_PAIRS+OTC_PAIRS+CRYPTO_PAIRS+STOCKS_PAIRS}
-TIMEFRAMES  = {"1":"1 хв","5":"5 хв","15":"15 хв","30":"30 хв","60":"1 год"}
+TIMEFRAMES  = {"1":"1 хв","3":"3 хв","5":"5 хв","15":"15 хв","30":"30 хв","60":"1 год"}
 CRYPTO_TF   = {"5":"5 хв","15":"15 хв","30":"30 хв","60":"1 год","240":"4 год"}
 STOCKS_TF   = {"5":"5 хв","15":"15 хв","30":"30 хв","60":"1 год"}
 
@@ -272,6 +272,30 @@ def calc_volume_trend(volumes):
     if ratio<0.5: return -1  # Падіння об'єму — слабкий сигнал
     return 0
 
+def calc_stc(closes, cycle=10, fast=23, slow=50, factor=0.5):
+    """Schaff Trend Cycle — найточніший для бінарних опціонів"""
+    if len(closes) < slow + cycle: return None
+    # MACD лінія
+    ema_fast = calc_ema(closes, fast)
+    ema_slow = calc_ema(closes, slow)
+    if ema_fast is None or ema_slow is None: return None
+    # Будуємо MACD серію
+    macd_line = []
+    for i in range(slow, len(closes)+1):
+        ef = calc_ema(closes[:i], fast)
+        es = calc_ema(closes[:i], slow)
+        if ef and es: macd_line.append(ef - es)
+    if len(macd_line) < cycle: return None
+    # Stochastic від MACD
+    hh = max(macd_line[-cycle:])
+    ll = min(macd_line[-cycle:])
+    if hh == ll: return 50
+    stoch_macd = (macd_line[-1] - ll) / (hh - ll) * 100
+    # Плавний STC
+    stc = stoch_macd
+    return round(stc, 1)
+
+
 # ══════════════════════════════════════════
 #  API ДАНІ
 # ══════════════════════════════════════════
@@ -292,7 +316,7 @@ def to_twelve_symbol(symbol):
 def get_candles_twelve(symbol, tf, count=80):
     """TwelveData — 800 безкоштовних запитів/день, всі ринки"""
     # TWELVE_KEY завжди встановлено
-    tf_map = {"1":"1min","5":"5min","15":"15min","30":"30min","60":"1h","240":"4h"}
+    tf_map = {"1":"1min","3":"3min","5":"5min","15":"15min","30":"30min","60":"1h","240":"4h"}
     interval = tf_map.get(tf, "5min")
     sym, mkt = to_twelve_symbol(symbol)
     try:
@@ -334,7 +358,7 @@ def get_price_twelve(symbol):
     return None
 
 def get_candles_yahoo(symbol,tf,count=80):
-    tf_map={"1":"1m","5":"5m","15":"15m","30":"30m","60":"1h","240":"4h"}
+    tf_map={"1":"1m","3":"5m","5":"5m","15":"15m","30":"30m","60":"1h","240":"4h"}
     interval=tf_map.get(tf,"5m")
     period="1d" if tf in ["1","5","15"] else "5d"
     for yhost in ["query1","query2"]:
@@ -397,7 +421,7 @@ def generate_signal(pair_name, tf):
         bb    = sr(4)*100
         willr = round(-80+sr(6)*60)
         ec    = 2 if sr(7)>0.6 else(-2 if sr(7)<0.4 else 1)
-        candle= 0; vol_t=0
+        candle= 0; vol_t=0; stc=None
         e9 =live*(1+(sr(8)-.5)*.001)
         e21=live*(1+(sr(9)-.5)*.002)
         e50=live*(1+(sr(10)-.5)*.003)
@@ -418,6 +442,7 @@ def generate_signal(pair_name, tf):
         willr = calc_williams_r(closes,highs,lows)
         candle= calc_candlestick(closes,highs,lows)
         vol_t = calc_volume_trend(volumes)
+        stc   = calc_stc(closes)
         e9 =calc_ema(closes,9)  or live
         e21=calc_ema(closes,21) or live
         e50=calc_ema(closes,50) or live
@@ -477,6 +502,13 @@ def generate_signal(pair_name, tf):
     if vol_t==1:  votes.append(("Volume",1,"📊 Зростання об'єму — підтвердження"))
     elif vol_t==-1: votes.append(("Volume",-1,"📊 Падіння об'єму — слабкий сигнал"))
 
+    # STC — Schaff Trend Cycle
+    if stc is not None:
+        if stc<25:    votes.append(("STC",1,f"STC={stc} перепроданість — BUY 🔥"))
+        elif stc>75:  votes.append(("STC",-1,f"STC={stc} перекупленість — SELL 🔥"))
+        elif stc<50:  votes.append(("STC",1,f"STC={stc} висхідний імпульс"))
+        else:         votes.append(("STC",-1,f"STC={stc} низхідний імпульс"))
+
     bc=sum(1 for v in votes if v[1]==1)
     sc=sum(1 for v in votes if v[1]==-1)
     nc=sum(1 for v in votes if v[1]==0)
@@ -512,7 +544,7 @@ def generate_signal(pair_name, tf):
         rsi=rsi, adx=adx_val, adx_ok=adx_ok,
         willr=willr, candle=candle, vol_t=vol_t,
         e9=round(e9,d), e21=round(e21,d), e50=round(e50,d),
-        votes=votes, bc=bc, sc=sc, nc=nc,
+        stc=stc, votes=votes, bc=bc, sc=sc, nc=nc,
         total=total_signals, real=True, is_otc=is_otc
     )
 
@@ -526,7 +558,7 @@ def trend_bar(val):
 def format_signal(pair,tf,d):
     now_dt=datetime.now(timezone.utc)+timedelta(hours=2)
     now=now_dt.strftime("%H:%M")
-    tf_hold={"1":(1,2),"5":(5,10),"15":(15,20),"30":(30,35),"60":(60,75),"240":(240,260)}
+    tf_hold={"1":(1,2),"3":(3,5),"5":(5,10),"15":(15,20),"30":(30,35),"60":(60,75),"240":(240,260)}
     hm=tf_hold.get(tf,(5,10))
     exp=(now_dt+timedelta(minutes=hm[0])).strftime("%H:%M")
     tf_label=TIMEFRAMES.get(tf,CRYPTO_TF.get(tf,STOCKS_TF.get(tf,tf)))
@@ -550,6 +582,14 @@ def format_signal(pair,tf,d):
     strong=[v for v in d["votes"] if v[1]==target_vote][:3]
     top3_lines="\n".join("\u2705 "+v[2] for v in strong) if strong else "\u26aa Слабкий консенсус"
     extras_lines=[]
+    # STC з кольоровим індикатором
+    stc_val=d.get("stc")
+    if stc_val is not None:
+        if stc_val<25:    stc_icon="🟢"; stc_zone="Перепроданість"
+        elif stc_val>75:  stc_icon="🔴"; stc_zone="Перекупленість"
+        elif stc_val<50:  stc_icon="🟡"; stc_zone="Зростання"
+        else:             stc_icon="🟠"; stc_zone="Падіння"
+        extras_lines.append(f"{stc_icon} STC: {stc_val} — {stc_zone}")
     if d.get("willr") is not None:
         extras_lines.append(f"\U0001f4d0 Williams %R: {d['willr']}")
     if d.get("candle",0)!=0:
@@ -702,7 +742,8 @@ def send_main(cid,mid=None):
          "╚══ Оберіть категорію ══╝")
     if mid:
         try: bot.edit_message_text(txt,cid,mid,parse_mode="Markdown",reply_markup=main_kb()); return
-        except: pass
+        except Exception as e:
+            if "not modified" not in str(e): print(f"send_main err: {e}")
     bot.send_message(cid,txt,parse_mode="Markdown",reply_markup=main_kb())
 
 @bot.message_handler(commands=["start","menu"])
@@ -753,7 +794,8 @@ def do_signal(cid, mid, pair, tf):
         bot.edit_message_text(format_signal(pair,tf,sig),cid,mid,
                               parse_mode="Markdown",reply_markup=result_kb(pair,tf))
     except Exception as e:
-        print(f"Помилка відправки сигналу: {e}")
+        if "not modified" not in str(e):
+            print(f"Помилка відправки сигналу: {e}")
 
 @bot.callback_query_handler(func=lambda c:True)
 def handle_callback(call):
@@ -815,9 +857,10 @@ def handle_callback(call):
             bot.send_message(cid,f"{emoji}\n\n📊 WR: *{wr}%* ({s['wins']}W/{s['losses']}L)\n\nОберіть наступну дію:",
                              parse_mode="Markdown",reply_markup=main_kb())
     except Exception as e:
-        print(f"Помилка: {e}")
-        try: bot.send_message(cid,"Оберіть категорію:",reply_markup=main_kb())
-        except: pass
+        if "not modified" not in str(e):
+            print(f"Помилка: {e}")
+            try: bot.send_message(cid,"Оберіть категорію:",reply_markup=main_kb())
+            except: pass
 
 # ══════════════════════════════════════════
 #  ЗАПУСК
