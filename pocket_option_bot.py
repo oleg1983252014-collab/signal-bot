@@ -493,9 +493,7 @@ def generate_signal(pair_name, tf):
     score=bc-sc
     is_buy=score>=0
 
-    # ADX
-    adx_ok = adx is not None and adx>=25
-    adx_val = adx or 0
+    adx_val = adx if adx is not None else 0
 
     # Впевненість — на основі консенсусу голосів
     dominant=max(bc,sc)
@@ -540,63 +538,67 @@ def format_signal(pair,tf,d):
     tf_hold={"1":(1,2),"5":(5,10),"15":(15,20),"30":(30,35),"60":(60,75),"240":(240,260)}
     hm=tf_hold.get(tf,(5,10))
     exp=(now_dt+timedelta(minutes=hm[0])).strftime("%H:%M")
-
+    tf_label=TIMEFRAMES.get(tf,CRYPTO_TF.get(tf,STOCKS_TF.get(tf,tf)))
     is_crypto=any(pair==p["name"] for p in CRYPTO_PAIRS)
     is_stocks=any(pair==p["name"] for p in STOCKS_PAIRS)
-    mkt_lbl="₿ КРИПТО" if is_crypto else("📊 АКЦІЇ" if is_stocks else("🌙 OTC" if d["is_otc"] else "📈 FOREX"))
-
-    # Точність на основі реальних голосів
-    accuracy=min(95,max(75,round(60+(d["bc"] if d["is_buy"] else d["sc"])/d["total"]*35+(d["adx"]/100*10))))
-    trend_pct=min(99,max(50,round(50+(d["bc"] if d["is_buy"] else d["sc"])/d["total"]*45+(d["adx"]/100*10))))
-    t_bar=trend_bar(trend_pct)
-
+    mkt_lbl="КРИПТО" if is_crypto else("АКЦІЇ" if is_stocks else("OTC" if d["is_otc"] else "FOREX"))
+    total=max(d["total"],1)
+    dominant=max(d["bc"],d["sc"])
+    accuracy=min(95,max(75,round(60+(dominant/total)*35+(d["adx"]/100*10))))
+    trend_pct=min(99,max(50,round(50+(dominant/total)*45+(d["adx"]/100*10))))
+    f=round(trend_pct/10)
+    t_bar="\u25b0"*f+"\u25b1"*(10-f)
     if trend_pct<60:   t_str="Слабий"
     elif trend_pct<75: t_str="Середній"
     elif trend_pct<88: t_str="Сильний"
     else:              t_str="Дуже сильний"
+    dir_arrow="\u2b06\ufe0f" if d["is_buy"] else "\u2b07\ufe0f"
+    dir_emoji="\U0001f7e2" if d["is_buy"] else "\U0001f534"
+    direction="ВВЕРХ" if d["is_buy"] else "ВНИЗ"
+    target_vote=1 if d["is_buy"] else -1
+    strong=[v for v in d["votes"] if v[1]==target_vote][:3]
+    top3_lines="\n".join("\u2705 "+v[2] for v in strong) if strong else "\u26aa Слабкий консенсус"
+    extras_lines=[]
+    if d.get("willr") is not None:
+        extras_lines.append(f"\U0001f4d0 Williams %R: {d['willr']}")
+    if d.get("candle",0)!=0:
+        extras_lines.append("\U0001f56f Патерн: "+("Бичачий" if d["candle"]==1 else "Ведмежий"))
+    if d.get("vol_t",0)!=0:
+        extras_lines.append("\U0001f4ca Обєм: "+("Підтверджує" if d["vol_t"]==1 else "Слабкий"))
+    extras=("\n".join(extras_lines)+"\n\n") if extras_lines else ""
+    src="\U0001f534 Live" if d["real"] else "\u2699\ufe0f Розрахунок"
+    adx_status="\u2705" if d["adx_ok"] else "\u26a0\ufe0f слабкий"
+    lines=[
+        "\u256c\u2550\u2550 \U0001f916 *SIGNAL AI* \u2550\u2550\u2563",
+        "",
+        f"\U0001f3f7 *{pair}*",
+        f"\u23f1 {tf_label}    \U0001f3af Точність: *{accuracy}%*",
+        "",
+        f"\U0001f4ca *Сила тренду* \u2014 {t_str} *{trend_pct}%*",
+        f"`{t_bar}`",
+        "",
+        f"{dir_emoji} *Напрямок: {dir_arrow} {direction}*",
+        f"Утримувати до: *{exp}*",
+        "",
+        f"{d['strength']}   Голоси: *{d['bc']}\u2191 {d['sc']}\u2193*",
+        f"ADX: *{d['adx']}* {adx_status}",
+        "",
+    ]
+    if extras_lines:
+        lines+=extras_lines+[""]
+    lines+=[
+        f"\U0001f4b0 Вхід: `{d['live']}`",
+        f"\U0001f3af TP: `{d['tp1']}`  \U0001f6d1 SL: `{d['sl']}`  RR: 1:{d['rr']}",
+        "",
+        "\U0001f52c *Сигнали:*",
+        top3_lines,
+        "",
+        f"\U0001f4e1 {mkt_lbl}  {src}  {now}",
+        "\u2514\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2518",
+        "\u26a0\ufe0f _Не є фінансовою порадою_",
+    ]
+    return "\n".join(lines)
 
-    direction="⬆️ ВВЕРХ" if d["is_buy"] else "⬇️ ВНИЗ"
-    dir_emoji="🟢" if d["is_buy"] else "🔴"
-
-    # Топ-3 найсильніші голоси
-    strong=[v for v in d["votes"] if v[1]!=0]
-    strong.sort(key=lambda x:abs(x[1]),reverse=True)
-    top3="".join(f"{'✅' if v[1]==(1 if d['is_buy'] else -1) else '⚠️'} {v[2]}\n" for v in strong[:3])
-
-    # Williams і свічки бонус
-    extras=""
-    if d["willr"] is not None:
-        extras+=f"📐 Williams %R: `{d['willr']}`\n"
-    if d["candle"]!=0:
-        extras+=f"🕯 Патерн: {'Бичачий ▲' if d['candle']==1 else 'Ведмежий ▼'}\n"
-    if d["vol_t"]!=0:
-        extras+=f"📊 Об'єм: {'Підтверджує ✅' if d['vol_t']==1 else 'Слабкий ⚠️'}\n"
-
-    return f"""╔══ 🤖 *SIGNAL AI* ══╗
-
-🏷 *{pair}*
-⏱ `{TIMEFRAMES.get(tf,tf)}` | 🎯 Точність: `{accuracy}%`
-
-📊 *Сила тренду* — {t_str} `{trend_pct}%`
-`{t_bar}`
-
-{dir_emoji} *Напрямок:*
-┌─────────────────────┐
-│  *{direction}*  до `{exp}`  │
-└─────────────────────┘
-
-💪 {d['strength']} | Голоси: `{d['bc']}↑ {d['sc']}↓`
-📐 ADX: `{d['adx']}` {'✅' if d['adx_ok'] else '⚠️ слабкий тренд'}
-
-{extras}
-💰 Вхід: `{d['live']}`
-🎯 TP: `{d['tp1']}` | 🛑 SL: `{d['sl']}` | R/R: `1:{d['rr']}`
-
-🔬 *Топ сигнали:*
-{top3}
-📡 {mkt_lbl} | 🔴 Live | `{now}`
-╚══════════════════════╝
-⚠️ _Не є фінансовою порадою_"""
 
 # ══════════════════════════════════════════
 #  АВТО-СКАНЕР (fix #10) — в окремому потоці
