@@ -4,12 +4,10 @@ from datetime import datetime, timezone, timedelta
 from telebot import TeleBot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-BOT_TOKEN   = os.environ.get("BOT_TOKEN")
-FINNHUB_KEY = os.environ.get("FINNHUB_KEY",  "d6omma1r01qi5kh3hgu0d6omma1r01qi5kh3hgug")
-ALPHA_KEY   = os.environ.get("ALPHA_KEY",    "XT8NVDBOAK9YWES5")
-FINNHUB_URL = "https://finnhub.io/api/v1"
-ALPHA_URL   = "https://www.alphavantage.co/query"
-STATS_FILE  = "stats.json"
+BOT_TOKEN    = os.environ.get("BOT_TOKEN")
+TWELVE_KEY   = os.environ.get("TWELVE_KEY", "99b3ca01dbdf45ccb2f5968b16af1c82")  # TwelveData
+TWELVE_URL   = "https://api.twelvedata.com"
+STATS_FILE   = "stats.json"
 
 bot = TeleBot(BOT_TOKEN)
 
@@ -277,67 +275,65 @@ def calc_volume_trend(volumes):
 # ══════════════════════════════════════════
 #  API ДАНІ
 # ══════════════════════════════════════════
-def to_finnhub(symbol):
+
+# ══════════════════════════════════════════
+#  TWELVEDATA API (основний, 800 запитів/день)
+# ══════════════════════════════════════════
+def to_twelve_symbol(symbol):
+    """Конвертує символ у формат TwelveData"""
     if symbol.endswith("=X"):
-        b=symbol[:-2]
-        if len(b)==6: return f"OANDA:{b[:3]}_{b[3:]}","forex"
+        b = symbol[:-2]
+        if len(b) == 6:
+            return f"{b[:3]}/{b[3:]}", "forex"
     if "-USD" in symbol:
-        return f"BINANCE:{symbol.replace('-USD','')}USDT","crypto"
-    return symbol,"stock"
+        return f"{symbol.replace('-USD', '')}/USD", "crypto"
+    return symbol, "stock"
 
-def get_candles_finnhub(symbol,tf,count=80):
-    tf_map={"1":"1","5":"5","15":"15","30":"30","60":"60","240":"D"}
-    res=tf_map.get(tf,"5")
-    finn,mkt=to_finnhub(symbol)
-    now=int(time.time())
-    mins=int(tf) if tf.isdigit() and tf!="240" else 1440
-    from_ts=now-count*mins*60*3
+def get_candles_twelve(symbol, tf, count=80):
+    """TwelveData — 800 безкоштовних запитів/день, всі ринки"""
+    if not TWELVE_KEY:
+        return [], [], [], []
+    tf_map = {"1":"1min","5":"5min","15":"15min","30":"30min","60":"1h","240":"4h"}
+    interval = tf_map.get(tf, "5min")
+    sym, mkt = to_twelve_symbol(symbol)
     try:
-        ep={"forex":"forex/candle","crypto":"crypto/candle","stock":"stock/candle"}[mkt]
-        url=f"{FINNHUB_URL}/{ep}?symbol={finn}&resolution={res}&from={from_ts}&to={now}&token={FINNHUB_KEY}"
-        r=requests.get(url,timeout=8); d=r.json()
-        print(f"[FINNHUB] {finn} s={d.get('s')} n={len(d.get('c',[]))}")
-        if d.get("s")!="ok" or not d.get("c"): return [],[],[],[]
-        c=d["c"]; h=d["h"]; l=d["l"]; v=d.get("v",[])
-        n=min(len(c),len(h),len(l),count)
-        return c[-n:],h[-n:],l[-n:],(v[-n:] if v else [])
-    except Exception as e: print(f"[FINNHUB ERR] {e}"); return [],[],[],[]
+        url = (f"{TWELVE_URL}/time_series"
+               f"?symbol={sym}&interval={interval}&outputsize={count}"
+               f"&apikey={TWELVE_KEY}&format=JSON")
+        r = requests.get(url, timeout=10)
+        data = r.json()
+        if data.get("status") == "error":
+            print(f"[TWELVE ERR] {sym}: {data.get('message','')}")
+            return [], [], [], []
+        values = data.get("values", [])
+        if not values:
+            print(f"[TWELVE] {sym} — немає даних")
+            return [], [], [], []
+        # TwelveData повертає від нового до старого — реверсуємо
+        values = list(reversed(values))
+        c = [float(v["close"])  for v in values]
+        h = [float(v["high"])   for v in values]
+        l = [float(v["low"])    for v in values]
+        vol = [float(v.get("volume", 0) or 0) for v in values]
+        print(f"[TWELVE] {sym} n={len(c)} ✅")
+        return c, h, l, vol
+    except Exception as e:
+        print(f"[TWELVE ERR] {sym}: {e}")
+        return [], [], [], []
 
-def get_candles_alpha(symbol,tf,count=80):
-    tf_map={"1":"1min","5":"5min","15":"15min","30":"30min","60":"60min"}
-    interval=tf_map.get(tf,"5min")
-    if symbol.endswith("=X"):
-        base=symbol[:-2]
-        if len(base)==6:
-            fs,ts=base[:3],base[3:]
-            try:
-                url=f"{ALPHA_URL}?function=FX_INTRADAY&from_symbol={fs}&to_symbol={ts}&interval={interval}&outputsize=compact&apikey={ALPHA_KEY}"
-                r=requests.get(url,timeout=10); data=r.json()
-                key=f"Time Series FX ({interval})"
-                if key not in data:
-                    print(f"[ALPHA FX] key not found, keys={list(data.keys())}")
-                    return [],[],[],[]
-                items=list(data[key].items())[:count]; items.reverse()
-                c=[float(v["4. close"]) for _,v in items]
-                h=[float(v["2. high"])  for _,v in items]
-                l=[float(v["3. low"])   for _,v in items]
-                print(f"[ALPHA FX] {symbol} n={len(c)}")
-                return c,h,l,[]
-            except Exception as e: print(f"[ALPHA FX ERR] {e}"); return [],[],[],[]
-    if not symbol.endswith("=X") and "-USD" not in symbol:
-        try:
-            url=f"{ALPHA_URL}?function=TIME_SERIES_INTRADAY&symbol={symbol}&interval={interval}&outputsize=compact&apikey={ALPHA_KEY}"
-            r=requests.get(url,timeout=10); data=r.json()
-            key=f"Time Series ({interval})"
-            if key not in data: return [],[],[],[]
-            items=list(data[key].items())[:count]; items.reverse()
-            c=[float(v["4. close"]) for _,v in items]
-            h=[float(v["2. high"])  for _,v in items]
-            l=[float(v["3. low"])   for _,v in items]
-            vol=[float(v["5. volume"]) for _,v in items]
-            return c,h,l,vol
-        except: return [],[],[],[]
-    return [],[],[],[]
+def get_price_twelve(symbol):
+    """Поточна ціна через TwelveData"""
+    if not TWELVE_KEY:
+        return None
+    sym, _ = to_twelve_symbol(symbol)
+    try:
+        url = f"{TWELVE_URL}/price?symbol={sym}&apikey={TWELVE_KEY}"
+        r = requests.get(url, timeout=5)
+        p = r.json().get("price")
+        if p:
+            return float(p)
+    except: pass
+    return None
 
 def get_candles_yahoo(symbol,tf,count=80):
     tf_map={"1":"1m","5":"5m","15":"15m","30":"30m","60":"1h","240":"4h"}
@@ -368,17 +364,17 @@ def get_candles(symbol,tf,count=80):
     return c,h,l,v
 
 def get_price(symbol,fallback):
-    finn,_=to_finnhub(symbol)
-    try:
-        r=requests.get(f"{FINNHUB_URL}/quote?symbol={finn}&token={FINNHUB_KEY}",timeout=5)
-        p=r.json().get("c")
-        if p and float(p)>0: return float(p)
-    except: pass
-    try:
-        url=f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval=1m&range=1d"
-        r=requests.get(url,timeout=5,headers={"User-Agent":"Mozilla/5.0"})
-        return float(r.json()["chart"]["result"][0]["meta"]["regularMarketPrice"])
-    except: return fallback
+    # 1. TwelveData
+    p=get_price_twelve(symbol)
+    if p and p>0: return p
+    # 2. Yahoo резерв
+    for yhost in ["query1","query2"]:
+        try:
+            url=f"https://{yhost}.finance.yahoo.com/v8/finance/chart/{symbol}?interval=1m&range=1d"
+            r=requests.get(url,timeout=5,headers={"User-Agent":"Mozilla/5.0"})
+            return float(r.json()["chart"]["result"][0]["meta"]["regularMarketPrice"])
+        except: pass
+    return fallback
 
 # ══════════════════════════════════════════
 #  ГЕНЕРАЦІЯ СИГНАЛУ (виправлено #1, #5, #6, #7)
