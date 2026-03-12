@@ -5,7 +5,7 @@ from telebot import TeleBot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 BOT_TOKEN    = os.environ.get("BOT_TOKEN")
-TWELVE_KEY   = os.environ.get("TWELVE_KEY", "99b3ca01dbdf45ccb2f5968b16af1c82")  # TwelveData
+TWELVE_KEY   = "99b3ca01dbdf45ccb2f5968b16af1c82"  # TwelveData (вшито напряму)
 TWELVE_URL   = "https://api.twelvedata.com"
 STATS_FILE   = "stats.json"
 
@@ -291,8 +291,7 @@ def to_twelve_symbol(symbol):
 
 def get_candles_twelve(symbol, tf, count=80):
     """TwelveData — 800 безкоштовних запитів/день, всі ринки"""
-    if not TWELVE_KEY:
-        return [], [], [], []
+    # TWELVE_KEY завжди встановлено
     tf_map = {"1":"1min","5":"5min","15":"15min","30":"30min","60":"1h","240":"4h"}
     interval = tf_map.get(tf, "5min")
     sym, mkt = to_twelve_symbol(symbol)
@@ -323,8 +322,7 @@ def get_candles_twelve(symbol, tf, count=80):
 
 def get_price_twelve(symbol):
     """Поточна ціна через TwelveData"""
-    if not TWELVE_KEY:
-        return None
+    # TWELVE_KEY завжди встановлено
     sym, _ = to_twelve_symbol(symbol)
     try:
         url = f"{TWELVE_URL}/price?symbol={sym}&apikey={TWELVE_KEY}"
