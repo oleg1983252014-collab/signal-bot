@@ -13,6 +13,9 @@ TWELVE_KEY = "99b3ca01dbdf45ccb2f5968b16af1c82"
 TWELVE_URL = "https://api.twelvedata.com"
 STATS_FILE = "stats.json"
 
+if not BOT_TOKEN:
+    raise ValueError("❌ BOT_TOKEN не встановлено! Додай змінну середовища BOT_TOKEN.")
+
 bot = TeleBot(BOT_TOKEN)
 
 # ══ ПАРИ ══════════════════════════════════════════════
@@ -819,7 +822,6 @@ def do_signal(cid,mid,pair,tf):
     # Генеруємо графік
     chart_buf = None
     try:
-        c2,h2,l2,o2 = get_candles(m["symbol"],tf,100) if True else ([],[],[],[])
         m2 = ALL_PAIRS.get(pair, FOREX_PAIRS[0])
         c2,h2,l2,o2 = get_candles(m2["symbol"],tf,100)
         if len(c2)>=20:
@@ -834,8 +836,13 @@ def do_signal(cid,mid,pair,tf):
     except: pass
     try:
         if chart_buf:
-            bot.send_photo(cid, chart_buf, caption=txt,
+            # Telegram caption ліміт — 1024 символи
+            caption = txt if len(txt) <= 1024 else txt[:1020] + "..."
+            bot.send_photo(cid, chart_buf, caption=caption,
                            parse_mode="Markdown", reply_markup=result_kb(pair,tf))
+            # Якщо текст обрізано — відправляємо повний окремо
+            if len(txt) > 1024:
+                bot.send_message(cid, txt, parse_mode="Markdown")
         else:
             bot.send_message(cid, txt, parse_mode="Markdown", reply_markup=result_kb(pair,tf))
     except Exception as e:
@@ -898,10 +905,14 @@ def handle_cb(call):
             pair=d[5:]
             bot.edit_message_text(f"⏱ *Таймфрейм для {pair}*\nОберіть:",cid,mid,parse_mode="Markdown",reply_markup=tf_kb(pair))
         elif d.startswith("tf|"):
-            _,pair,tf=d.split("|",2)
-            threading.Thread(target=do_signal,args=(cid,mid,pair,tf),daemon=True).start()
+            parts = d.split("|", 2)
+            if len(parts) == 3:
+                _,pair,tf = parts
+                threading.Thread(target=do_signal,args=(cid,mid,pair,tf),daemon=True).start()
         elif d.startswith(("win|","loss|")):
-            res,pair,tf=d.split("|",2)
+            parts = d.split("|", 2)
+            if len(parts) != 3: return
+            res,pair,tf = parts
             s=get_stats(cid); s["total"]+=1
             if res=="win":
                 s["wins"]+=1; s["streak"]=max(s.get("streak",0)+1,1); em="✅ Виграш записано!"
