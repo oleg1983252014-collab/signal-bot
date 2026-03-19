@@ -932,7 +932,39 @@ def handle_cb(call):
             except: pass
 
 if __name__=="__main__":
+    import logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(message)s"
+    )
+    logger = logging.getLogger(__name__)
+
     print("✅ SIGNAL AI Bot v2.0 запущено!")
-    try: bot.delete_webhook(drop_pending_updates=True); time.sleep(1)
-    except: pass
-    bot.infinity_polling(timeout=30,long_polling_timeout=20,skip_pending=True)
+    logger.info("Bot starting...")
+
+    # Скидаємо webhook і pending updates
+    try:
+        bot.delete_webhook(drop_pending_updates=True)
+        time.sleep(1)
+    except Exception as e:
+        logger.warning(f"delete_webhook: {e}")
+
+    # Запуск з автоперезапуском при будь-якій помилці
+    while True:
+        try:
+            logger.info("Starting polling...")
+            bot.infinity_polling(
+                timeout=30,
+                long_polling_timeout=25,
+                skip_pending=True,
+                none_stop=True,        # не зупиняється при помилках
+                restart_on_change=False
+            )
+        except Exception as e:
+            logger.error(f"Polling crashed: {e}")
+            print(f"[RESTART] Polling впав: {e} — перезапуск через 5 сек...")
+            time.sleep(5)
+            try:
+                bot.delete_webhook(drop_pending_updates=True)
+                time.sleep(1)
+            except: pass
