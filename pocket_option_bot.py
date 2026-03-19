@@ -9,7 +9,8 @@ from telebot import TeleBot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 BOT_TOKEN  = os.environ.get("BOT_TOKEN")
-TWELVE_KEY = "99b3ca01dbdf45ccb2f5968b16af1c82"
+# TWELVE_KEY — береться з Railway змінних, з fallback на хардкод для локального запуску
+TWELVE_KEY = os.environ.get("TWELVE_KEY", "99b3ca01dbdf45ccb2f5968b16af1c82")
 TWELVE_URL = "https://api.twelvedata.com"
 STATS_FILE = "stats.json"
 
@@ -251,7 +252,19 @@ def get_session():
     else:           return "Нічна сесія 🔴","poor",0.75
 
 # ══ API ═══════════════════════════════════════════════
+# ══ КЕШ СВІЧОК ════════════════════════════════════════
+# Зберігає дані на TF_CACHE_SEC секунд — економить API запити
+_candle_cache = {}  # {symbol+tf: (timestamp, c, h, l, o)}
+TF_CACHE_SEC = {"1":30,"3":90,"5":150,"15":300,"30":600,"60":1200,"240":2400}
+
 def get_candles(symbol,tf,count=100):
+    cache_key = f"{symbol}_{tf}"
+    ttl = TF_CACHE_SEC.get(tf, 150)
+    # Перевірка кешу
+    if cache_key in _candle_cache:
+        ts, c, h, l, o = _candle_cache[cache_key]
+        if time.time() - ts < ttl:
+            return c, h, l, o
     tf_map={"1":"1min","3":"3min","5":"5min","15":"15min","30":"30min","60":"1h","240":"4h"}
     interval=tf_map.get(tf,"5min")
     # Для акцій не додаємо /
@@ -265,6 +278,8 @@ def get_candles(symbol,tf,count=100):
         h=[float(v["high"]) for v in vals]
         l=[float(v["low"]) for v in vals]
         o=[float(v["open"]) for v in vals]
+        # Зберігаємо в кеш
+        _candle_cache[cache_key] = (time.time(), c, h, l, o)
         return c,h,l,o
     except: return [],[],[],[]
 
@@ -461,7 +476,30 @@ def generate_signal(pair_name,tf):
     acc=min(94,max(68,round(acc_raw*sess_mult)))
 
     # Сила
-    if not adx_ok and ratio<0.65: strength="⛔ ФІЛЬТР ADX"; blocked=True
+    # ── КРИТИЧНИЙ БЛОК STC ─────────────────────────────
+    # STC ≥ 85 при BUY або STC ≤ 15 при SELL — заборона незалежно від решти
+    stc_v = next((x["v"] for x in votes if x["n"]=="STC"), 0)
+    rsi_v = next((x["v"] for x in votes if x["n"]=="RSI"), 0)
+    psar_v= next((x["v"] for x in votes if x["n"]=="Parab SAR"), 0)
+    ha_v  = next((x["v"] for x in votes if x["n"]=="Heikin Ashi"), 0)
+
+    stc_blocks = (stc is not None) and ((stc>=85 and is_buy) or (stc<=15 and not is_buy))
+    rsi_extreme = (rsi>=75 and is_buy) or (rsi<=25 and not is_buy)
+    psar_against= psar_v!=0 and (psar_v==1)!=is_buy and ("розворот" in psar_lbl or "свіжий" in psar_lbl)
+    ha_against  = ha_v!=0 and (ha_v==1)!=is_buy and "🔥" in ha_lbl
+
+    block_reasons=[]
+    if stc_blocks:    block_reasons.append(f"STC={stc:.0f} {'перекупленість' if is_buy else 'перепроданість'}")
+    if rsi_extreme:   block_reasons.append(f"RSI={rsi} {'перекупленість' if is_buy else 'перепроданість'}")
+    if psar_against:  block_reasons.append("PSAR свіжий розворот проти")
+    if ha_against:    block_reasons.append("HA сильний сигнал проти")
+
+    hard_block = stc_blocks or (rsi_extreme and (psar_against or ha_against)) or len(block_reasons)>=2
+
+    if hard_block:
+        strength="⛔ НЕ ТОРГУВАТИ"; blocked=True
+        acc=min(acc,60)
+    elif not adx_ok and ratio<0.65: strength="⛔ ФІЛЬТР ADX"; blocked=True
     elif ratio<0.58: strength="⚠️ СЛАБКИЙ"; blocked=False
     elif ratio<0.68: strength="✅ СЕРЕДНІЙ"; blocked=False
     elif ratio<0.80: strength="🔥 СИЛЬНИЙ"; blocked=False
@@ -482,7 +520,7 @@ def generate_signal(pair_name,tf):
             "fib_lbl":fib_lbl,"sr_lbl":sr_lbl,"pat_lbl":pat_lbl,
             "votes":votes,"bc":bc,"sc":sc,"buy_w":round(buy_w,1),"sell_w":round(sell_w,1),
             "consensus":consensus,"sess":sess_name,"sess_q":sess_q,
-            "real":real,"is_otc":is_otc}
+            "real":real,"is_otc":is_otc,"block_reasons":block_reasons}
 
 
 # ══ ГЕНЕРАЦІЯ ГРАФІКУ ════════════════════════════════
@@ -646,8 +684,14 @@ def format_signal(pair,tf,d):
     # ADX
     adx_em="✅" if d["adx_ok"] else "⚠️"
 
-    # Блокування
-    block_warn="\n⛔ *СИГНАЛ СЛАБКИЙ — КРАЩЕ ПРОПУСТИТИ*\n" if d.get("blocked") else ""
+    # Блокування — з причинами
+    reasons = d.get("block_reasons", [])
+    if d.get("blocked") and reasons:
+        block_warn = "\n⛔ *НЕ ТОРГУВАТИ*\n" + "\n".join(f"• {r}" for r in reasons) + "\n"
+    elif d.get("blocked"):
+        block_warn = "\n⛔ *СИГНАЛ ЗАБЛОКОВАНИЙ — НЕ ТОРГУВАТИ*\n"
+    else:
+        block_warn = ""
 
     lines=[
         "╔══ ⚡ *SIGNAL AI v2.0* ══╗",
