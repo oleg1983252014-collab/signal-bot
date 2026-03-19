@@ -834,7 +834,9 @@ def send_main(cid,mid=None):
          "• 🆕 Торгові сесії\n\n"
          "📡 TwelveData API\n"
          "🎯 Точність: ~82-94%\n\n"
-         "╚══ Оберіть категорію ══╝")
+         "💡 *Просто напиши назву пари:*\n"
+         "`EURUSD` • `chfjpy` • `btc` • `AAPL`\n\n"
+         "╚══ Або оберіть категорію ══╝")
     if mid:
         try: bot.edit_message_text(txt,cid,mid,parse_mode="Markdown",reply_markup=main_kb()); return
         except: pass
@@ -894,8 +896,57 @@ def do_signal(cid,mid,pair,tf):
         try: bot.send_message(cid, txt, parse_mode="Markdown", reply_markup=result_kb(pair,tf))
         except: pass
 
-@bot.message_handler(commands=["start","menu"])
-def cmd_start(msg): send_main(msg.chat.id)
+# ══ LOOKUP — нормалізація довільного тексту пари ══════
+# "chfjpy", "CHF/JPY", "chf/jpy otc", "EURUSD" → канонічна назва
+_PAIR_LOOKUP = {}
+for _p in FOREX_PAIRS + OTC_PAIRS + CRYPTO_PAIRS + STOCKS_PAIRS:
+    _name = _p["name"]
+    _key1 = _name.replace("/","").replace(" ","").upper()
+    _key2 = _name.upper()
+    _PAIR_LOOKUP[_key1] = _name
+    _PAIR_LOOKUP[_key2] = _name
+    _PAIR_LOOKUP[_name] = _name
+# Тікери акцій
+_PAIR_LOOKUP.update({
+    "AAPL":"Apple","TSLA":"Tesla","NVDA":"NVIDIA","AMZN":"Amazon",
+    "GOOGL":"Google","MSFT":"Microsoft","META":"Meta","NFLX":"Netflix"
+})
+# Псевдоніми крипто
+_PAIR_LOOKUP.update({
+    "BITCOIN":"BTC/USD","ETHEREUM":"ETH/USD","SOLANA":"SOL/USD",
+    "RIPPLE":"XRP/USD","CARDANO":"ADA/USD","DOGECOIN":"DOGE/USD",
+    "LITECOIN":"LTC/USD","BINANCE":"BNB/USD","BNB":"BNB/USD",
+})
+
+def normalize_pair(text):
+    """Перетворює довільний текст в канонічну назву пари.
+    Підтримує: EURUSD, EUR/USD, eurusd, chfjpy, btc, bitcoin, AAPL, apple,
+               EURUSD OTC, eurusdotc, EUR/USD OTC
+    """
+    t = text.strip().upper().replace("-","").replace("_","")
+
+    # Спроба 1: як є
+    if t in _PAIR_LOOKUP: return _PAIR_LOOKUP[t]
+
+    # Спроба 2: без слешу і пробілів
+    t2 = t.replace("/","").replace(" ","")
+    if t2 in _PAIR_LOOKUP: return _PAIR_LOOKUP[t2]
+
+    # Спроба 3: OTC формат "EURUSD OTC" → "EURUSDOTC"
+    if "OTC" in t:
+        t_otc = t.replace(" ","").replace("/","")
+        if t_otc in _PAIR_LOOKUP: return _PAIR_LOOKUP[t_otc]
+
+    # Спроба 4: додаємо /USD для крипто (btc → BTC/USD)
+    t_usd = t2 + "USD"
+    if t_usd in _PAIR_LOOKUP: return _PAIR_LOOKUP[t_usd]
+
+    # Спроба 5: часткове співпадіння — перші 6 символів
+    for key, val in _PAIR_LOOKUP.items():
+        if len(t2) >= 3 and key.startswith(t2) and len(key) <= len(t2)+3:
+            return val
+
+    return None
 
 @bot.message_handler(commands=["stats"])
 def cmd_stats(msg): bot.send_message(msg.chat.id,stats_text(msg.chat.id),parse_mode="Markdown",reply_markup=main_kb())
@@ -905,7 +956,42 @@ def cmd_scan(msg):
     bot.send_message(msg.chat.id,"🔍 *Запускаю сканер...*",parse_mode="Markdown")
     threading.Thread(target=run_scanner,args=(msg.chat.id,),daemon=True).start()
 
-@bot.callback_query_handler(func=lambda c:True)
+@bot.message_handler(func=lambda m: True)
+def cmd_text(msg):
+    """Обробляє довільний текст — назва пари або тікер"""
+    cid = msg.chat.id
+    text = (msg.text or "").strip()
+    if not text: return
+
+    pair = normalize_pair(text)
+
+    if pair:
+        is_crypto = any(pair == p["name"] for p in CRYPTO_PAIRS)
+        is_stocks = any(pair == p["name"] for p in STOCKS_PAIRS)
+        is_otc    = "OTC" in pair
+        tfs = CRYPTO_TF if is_crypto else (STOCKS_TF if is_stocks else TIMEFRAMES)
+        kb = InlineKeyboardMarkup(row_width=3)
+        kb.add(*[InlineKeyboardButton(v, callback_data=f"tf|{pair}|{k}")
+                 for k,v in tfs.items()])
+        kb.add(InlineKeyboardButton("◀️ Меню", callback_data="main"))
+        cat = "₿ Крипто" if is_crypto else ("📊 Акції" if is_stocks else ("🌙 OTC" if is_otc else "📈 Forex"))
+        bot.send_message(
+            cid,
+            f"✅ *{pair}* знайдено  {cat}\n\n⏱ Оберіть таймфрейм:",
+            parse_mode="Markdown", reply_markup=kb
+        )
+    else:
+        bot.send_message(
+            cid,
+            "❓ *Пару не знайдено*\n\n"
+            "Спробуй інший формат:\n"
+            "`EURUSD` або `EUR/USD`\n"
+            "`chfjpy` або `CHF/JPY`\n"
+            "`btc` або `bitcoin`\n"
+            "`AAPL` або `apple`\n\n"
+            "Або оберіть з меню 👇",
+            parse_mode="Markdown", reply_markup=main_kb()
+        )
 def handle_cb(call):
     cid=call.message.chat.id; mid=call.message.message_id; d=call.data
     bot.answer_callback_query(call.id)
