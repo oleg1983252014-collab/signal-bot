@@ -823,6 +823,30 @@ def result_kb(pair,tf):
     return kb
 
 # ══ ХЕНДЛЕРИ ══════════════════════════════════════════
+def start_kb():
+    """Reply keyboard — постійна клавіатура знизу"""
+    from telebot.types import ReplyKeyboardMarkup, KeyboardButton
+    kb = ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+    kb.add(
+        KeyboardButton("📈 FOREX"),   KeyboardButton("🌙 OTC"),
+        KeyboardButton("₿ КРИПТО"),   KeyboardButton("📊 АКЦІЇ"),
+        KeyboardButton("🔍 Сканер"),  KeyboardButton("📊 Статистика"),
+        KeyboardButton("🕐 Сесії"),   KeyboardButton("🏠 Меню"),
+    )
+    return kb
+
+# Маппінг тексту Reply кнопок → callback дії
+_REPLY_MAP = {
+    "📈 FOREX":      "menu_forex",
+    "🌙 OTC":         "menu_otc",
+    "₿ КРИПТО":      "menu_crypto",
+    "📊 АКЦІЇ":       "menu_stocks",
+    "🔍 СКАНЕР":      "scanner",
+    "📊 СТАТИСТИКА":  "stats",
+    "🕐 СЕСІЇ":       "sessions",
+    "🏠 МЕНЮ":        "main",
+}
+
 def send_main(cid,mid=None):
     txt=("╔══ ⚡ *SIGNAL AI v2.0* ══╗\n\n"
          "14 індикаторів для точного аналізу:\n\n"
@@ -948,6 +972,16 @@ def normalize_pair(text):
 
     return None
 
+@bot.message_handler(commands=["start","menu"])
+def cmd_start(msg):
+    send_main(msg.chat.id)
+    bot.send_message(
+        msg.chat.id,
+        "⌨️ Клавіатура активована!\n_Або просто напиши назву пари: `eurusd`, `chfjpy`, `btc`_",
+        parse_mode="Markdown",
+        reply_markup=start_kb()
+    )
+
 @bot.message_handler(commands=["stats"])
 def cmd_stats(msg): bot.send_message(msg.chat.id,stats_text(msg.chat.id),parse_mode="Markdown",reply_markup=main_kb())
 
@@ -958,10 +992,33 @@ def cmd_scan(msg):
 
 @bot.message_handler(func=lambda m: True)
 def cmd_text(msg):
-    """Обробляє довільний текст — назва пари або тікер"""
+    """Обробляє довільний текст — Reply кнопки або назва пари"""
     cid = msg.chat.id
     text = (msg.text or "").strip()
     if not text: return
+
+    # ── Перевірка Reply кнопок ──
+    upper = text.upper()
+    if upper in _REPLY_MAP:
+        action = _REPLY_MAP[upper]
+        if action == "main":
+            send_main(cid)
+        elif action == "menu_forex":
+            bot.send_message(cid,"📈 *FOREX пари*\nОберіть пару:",parse_mode="Markdown",reply_markup=pairs_kb(FOREX_PAIRS,"main"))
+        elif action == "menu_otc":
+            bot.send_message(cid,"🌙 *OTC пари*\nОберіть пару:",parse_mode="Markdown",reply_markup=pairs_kb(OTC_PAIRS,"main"))
+        elif action == "menu_crypto":
+            bot.send_message(cid,"₿ *КРИПТО*\nОберіть пару:",parse_mode="Markdown",reply_markup=pairs_kb(CRYPTO_PAIRS,"main"))
+        elif action == "menu_stocks":
+            bot.send_message(cid,"📊 *АКЦІЇ*\nОберіть:",parse_mode="Markdown",reply_markup=pairs_kb(STOCKS_PAIRS,"main"))
+        elif action == "scanner":
+            bot.send_message(cid,"🔍 *Запускаю сканер...*",parse_mode="Markdown")
+            threading.Thread(target=run_scanner,args=(cid,),daemon=True).start()
+        elif action == "stats":
+            bot.send_message(cid,stats_text(cid),parse_mode="Markdown",reply_markup=main_kb())
+        elif action == "sessions":
+            bot.send_message(cid,sessions_text(),parse_mode="Markdown",reply_markup=main_kb())
+        return
 
     pair = normalize_pair(text)
 
@@ -1072,12 +1129,20 @@ if __name__=="__main__":
     print("✅ SIGNAL AI Bot v2.0 запущено!")
     logger.info("Bot starting...")
 
-    # Скидаємо webhook і pending updates
-    try:
-        bot.delete_webhook(drop_pending_updates=True)
-        time.sleep(1)
-    except Exception as e:
-        logger.warning(f"delete_webhook: {e}")
+    # ── Агресивне очищення старих сесій (виправляє 409 Conflict) ──
+    for attempt in range(5):
+        try:
+            bot.delete_webhook(drop_pending_updates=True)
+            logger.info("Webhook видалено")
+            time.sleep(2)
+            break
+        except Exception as e:
+            logger.warning(f"delete_webhook спроба {attempt+1}: {e}")
+            time.sleep(3)
+
+    # Додаткова пауза щоб старий процес точно завершився
+    logger.info("Чекаємо 5 сек перед стартом polling...")
+    time.sleep(5)
 
     # Запуск з автоперезапуском при будь-якій помилці
     while True:
@@ -1087,14 +1152,15 @@ if __name__=="__main__":
                 timeout=30,
                 long_polling_timeout=25,
                 skip_pending=True,
-                none_stop=True,        # не зупиняється при помилках
-                restart_on_change=False
+                none_stop=True,
+                restart_on_change=False,
+                allowed_updates=["message","callback_query"]
             )
         except Exception as e:
             logger.error(f"Polling crashed: {e}")
-            print(f"[RESTART] Polling впав: {e} — перезапуск через 5 сек...")
-            time.sleep(5)
+            print(f"[RESTART] Polling впав: {e} — перезапуск через 10 сек...")
+            time.sleep(10)
             try:
                 bot.delete_webhook(drop_pending_updates=True)
-                time.sleep(1)
+                time.sleep(3)
             except: pass
