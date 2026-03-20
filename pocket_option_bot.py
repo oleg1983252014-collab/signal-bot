@@ -1064,6 +1064,7 @@ def cmd_text(msg):
             "Або оберіть з меню 👇",
             parse_mode="Markdown", reply_markup=main_kb()
         )
+@bot.callback_query_handler(func=lambda c: True)
 def handle_cb(call):
     cid=call.message.chat.id; mid=call.message.message_id; d=call.data
     bot.answer_callback_query(call.id)
