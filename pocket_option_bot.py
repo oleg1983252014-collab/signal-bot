@@ -301,7 +301,7 @@ def generate_signal(pair_name,tf):
 
     if not real:
         # Fallback — псевдорандом на основі пари+часу
-        seed=sum(ord(x) for x in pair_name)+int(tf)*7+int(time.time()//300)
+        seed=sum(ord(x) for x in pair_name)+(int(tf) if tf.isdigit() else 5)*7+int(time.time()//300)
         def sr(i): v=math.sin(seed*1.1+i*0.7)*43758.5453; return v-math.floor(v)
         base=live; cv=[base]; hv=[base]; lv=[base]; ov=[base]
         for i in range(1,80):
@@ -642,7 +642,10 @@ def bar(val,n=10):
 def format_signal(pair,tf,d):
     now_dt=datetime.now(timezone.utc)+timedelta(hours=2)
     tf_hold={"1":2,"3":4,"5":8,"15":20,"30":35,"60":70,"240":260}
-    exp=(now_dt+timedelta(minutes=tf_hold.get(int(tf),5))).strftime("%H:%M")
+    try:
+        exp=(now_dt+timedelta(minutes=tf_hold.get(int(tf),5))).strftime("%H:%M")
+    except:
+        exp=(now_dt+timedelta(minutes=5)).strftime("%H:%M")
     tf_lbl=TIMEFRAMES.get(tf,CRYPTO_TF.get(tf,STOCKS_TF.get(tf,tf+"хв")))
     is_buy=d["is_buy"]
     arrow="⬆️" if is_buy else "⬇️"
@@ -879,14 +882,26 @@ def do_signal(cid,mid,pair,tf):
             if txt!=last: bot.edit_message_text(txt,cid,mid,parse_mode="Markdown"); last=txt
         except: pass
         time.sleep(0.7)
-    sig=generate_signal(pair,tf)
+    sig = None
+    try:
+        sig = generate_signal(pair,tf)
+    except Exception as e:
+        print(f"[SIGNAL ERR] {pair} {tf}: {e}")
+        import traceback; traceback.print_exc()
+
     if sig is None:
         try:
-            bot.edit_message_text(f"⚠️ *Немає даних*\n\n`{pair}` | `{tf_lbl}`\n\nAPI не відповів. Спробуйте ще раз.",
-                                  cid,mid,parse_mode="Markdown",
-                                  reply_markup=InlineKeyboardMarkup().add(
-                                      InlineKeyboardButton("🔄 Спробувати",callback_data=f"tf|{pair}|{tf}"),
-                                      InlineKeyboardButton("🏠 Меню",callback_data="main")))
+            bot.delete_message(cid, mid)
+        except: pass
+        try:
+            bot.send_message(
+                cid,
+                f"⚠️ *Помилка аналізу*\n\n`{pair}` | `{tf_lbl}`\n\n"
+                f"Не вдалося згенерувати сигнал. Спробуйте ще раз.",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup().add(
+                    InlineKeyboardButton("🔄 Спробувати",callback_data=f"tf|{pair}|{tf}"),
+                    InlineKeyboardButton("🏠 Меню",callback_data="main")))
         except: pass
         return
     # Генеруємо графік
