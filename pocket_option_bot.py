@@ -1129,38 +1129,48 @@ if __name__=="__main__":
     print("✅ SIGNAL AI Bot v2.0 запущено!")
     logger.info("Bot starting...")
 
-    # ── Агресивне очищення старих сесій (виправляє 409 Conflict) ──
-    for attempt in range(5):
+    # ── Повне очищення старих сесій ──
+    # Закриваємо всі з'єднання і видаляємо webhook
+    for attempt in range(8):
+        try:
+            bot.close()  # закриває активні сесії
+        except: pass
         try:
             bot.delete_webhook(drop_pending_updates=True)
             logger.info("Webhook видалено")
-            time.sleep(2)
             break
         except Exception as e:
             logger.warning(f"delete_webhook спроба {attempt+1}: {e}")
-            time.sleep(3)
+            time.sleep(3 + attempt * 2)
 
-    # Додаткова пауза щоб старий процес точно завершився
-    logger.info("Чекаємо 5 сек перед стартом polling...")
-    time.sleep(5)
+    # Довга пауза — чекаємо поки старий процес точно завершиться
+    logger.info("Чекаємо 15 сек перед стартом polling...")
+    time.sleep(15)
 
-    # Запуск з автоперезапуском при будь-якій помилці
+    # Запуск з автоперезапуском
     while True:
         try:
             logger.info("Starting polling...")
             bot.infinity_polling(
-                timeout=30,
-                long_polling_timeout=25,
+                timeout=25,
+                long_polling_timeout=20,
                 skip_pending=True,
                 none_stop=True,
                 restart_on_change=False,
                 allowed_updates=["message","callback_query"]
             )
         except Exception as e:
-            logger.error(f"Polling crashed: {e}")
-            print(f"[RESTART] Polling впав: {e} — перезапуск через 10 сек...")
-            time.sleep(10)
+            err = str(e)
+            logger.error(f"Polling crashed: {err}")
+            if "409" in err:
+                logger.warning("409 Conflict — чекаємо 30 сек...")
+                time.sleep(30)
+            else:
+                time.sleep(10)
+            try:
+                bot.close()
+            except: pass
             try:
                 bot.delete_webhook(drop_pending_updates=True)
-                time.sleep(3)
+                time.sleep(5)
             except: pass
