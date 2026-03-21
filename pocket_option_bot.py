@@ -11,10 +11,11 @@ import matplotlib.pyplot as plt
 import warnings; warnings.filterwarnings("ignore")
 
 BOT_TOKEN  = os.environ.get("BOT_TOKEN")
-TWELVE_KEY = os.environ.get("TWELVE_KEY","99b3ca01dbdf45ccb2f5968b16af1c82")
+TWELVE_KEY = os.environ.get("TWELVE_KEY")  # встанови в Railway Variables
 TWELVE_URL = "https://api.twelvedata.com"
 STATS_FILE = "stats.json"
-if not BOT_TOKEN: raise ValueError("BOT_TOKEN не встановлено!")
+if not BOT_TOKEN:   raise ValueError("BOT_TOKEN не встановлено!")
+if not TWELVE_KEY:  TWELVE_KEY = "99b3ca01dbdf45ccb2f5968b16af1c82"  # резерв
 bot = TeleBot(BOT_TOKEN)
 
 FOREX_PAIRS=[
@@ -170,10 +171,13 @@ def get_candles(symbol,tf,count=100):
         return data
     except: return None
 
-def get_price(symbol,fallback):
+def get_price(symbol, fallback):
     try:
-        r=requests.get(f"{TWELVE_URL}/price?symbol={symbol}&apikey={TWELVE_KEY}",timeout=5)
-        p=r.json().get("price")
+        r = requests.get(
+            f"{TWELVE_URL}/price?symbol={symbol}&apikey={TWELVE_KEY}",
+            timeout=5
+        )
+        p = r.json().get("price")
         if p: return float(p)
     except: pass
     return fallback
@@ -191,6 +195,24 @@ def make_fallback(pair_name,tf):
         hi=max(op,cl)*(1+sr(i+30)*vf*0.4); lo=min(op,cl)*(1-sr(i+40)*vf*0.4)
         o.append(op);c.append(cl);h.append(hi);l.append(lo)
     return {"c":c,"h":h,"l":l,"o":o}
+
+# ══ RATE LIMITING ═════════════════════════════════════
+_user_last_req = {}
+_user_req_count = {}
+RATE_LIMIT_SEC = 3    # мін. секунд між запитами
+RATE_LIMIT_MIN = 20   # макс. запитів на хвилину
+
+def check_rate_limit(cid):
+    now = time.time(); cid = str(cid)
+    last = _user_last_req.get(cid, 0)
+    if now - last < RATE_LIMIT_SEC:
+        return False
+    count, window = _user_req_count.get(cid, (0, now))
+    if now - window > 60: count, window = 0, now
+    if count >= RATE_LIMIT_MIN: return False
+    _user_last_req[cid] = now
+    _user_req_count[cid] = (count + 1, window)
+    return True
 
 def generate_signal(pair_name,tf):
     m=ALL_PAIRS.get(pair_name,FOREX_PAIRS[0]); dp=m["d"]
@@ -468,7 +490,8 @@ def run_scanner(cid,tf="5"):
                 if not data: data=make_fallback(pname,tf)
                 buf=build_chart(pname,tf,data,sig)
                 bot.send_photo(cid,buf,caption=txt[:1024],parse_mode="Markdown",reply_markup=kb)
-            except:
+            except Exception as chart_err:
+                print(f"[CHART SEND ERR] {chart_err}")
                 bot.send_message(cid,txt,parse_mode="Markdown",reply_markup=kb)
             time.sleep(0.5)
     except Exception as e: print(f"[SCANNER ERR] {e}")
@@ -557,6 +580,16 @@ def send_main(cid,mid=None):
     bot.send_message(cid,txt,parse_mode="Markdown",reply_markup=main_kb())
 
 def do_signal(cid,mid,pair,tf):
+    # Перевірка що pair існує в списку
+    if pair not in ALL_PAIRS:
+        try: bot.edit_message_text("❌ Невідома пара",cid,mid,reply_markup=main_kb())
+        except: pass
+        return
+    # Перевірка rate limit
+    if not check_rate_limit(cid):
+        try: bot.edit_message_text("⏳ Зачекайте кілька секунд перед наступним запитом",cid,mid,reply_markup=main_kb())
+        except: pass
+        return
     tf_l=TF_LABEL.get(tf,tf)
     steps=[("⟳ Завантаження свічок...","▰▰▰▱▱▱▱▱▱▱ 30%"),
            ("⟳ BB + RSI(7)...","▰▰▰▰▰▰▱▱▱▱ 60%"),
@@ -678,11 +711,19 @@ def handle_cb(call):
                 cid,mid,parse_mode="Markdown",reply_markup=main_kb())
         elif d.startswith("pair_"):
             pair=d[5:]
+            # Валідація — pair має бути в списку
+            if pair not in ALL_PAIRS:
+                bot.answer_callback_query(call.id, "❌ Невідома пара")
+                return
             bot.edit_message_text(f"⏱ *{pair}*\nОберіть таймфрейм:",cid,mid,parse_mode="Markdown",reply_markup=tf_kb(pair))
         elif d.startswith("tf|"):
             parts=d.split("|",2)
             if len(parts)==3:
                 _,pair,tf=parts
+                # Валідація pair і tf
+                if pair not in ALL_PAIRS or tf not in TF_API:
+                    bot.answer_callback_query(call.id, "❌ Некоректні дані")
+                    return
                 threading.Thread(target=do_signal,args=(cid,mid,pair,tf),daemon=True).start()
         elif d.startswith(("win|","loss|")):
             parts=d.split("|",2)
