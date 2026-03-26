@@ -9,13 +9,33 @@ from telebot import TeleBot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 BOT_TOKEN  = os.environ.get("BOT_TOKEN")
-# TWELVE_KEY — береться з Railway змінних, з fallback на хардкод для локального запуску
-TWELVE_KEY = os.environ.get("TWELVE_KEY", "99b3ca01dbdf45ccb2f5968b16af1c82")
+TWELVE_KEY = os.environ.get("TWELVE_KEY")
+if not TWELVE_KEY:
+    TWELVE_KEY = "99b3ca01dbdf45ccb2f5968b16af1c82"  # резерв для локального запуску
 
 # ══ АВТО-СИГНАЛИ: список підписників ══════════════════
-_subscribers = set()   # chat_id тих хто підписаний на авто-сигнали
-_auto_tf     = {}      # {chat_id: таймфрейм} — який ТФ хоче користувач
-AUTO_DEFAULT_TF = "5"  # дефолтний таймфрейм для авто-сигналів
+SUBSCRIBERS_FILE = "subscribers.json"   # зберігаємо підписників між рестартами
+_subscribers = set()
+_auto_tf     = {}
+AUTO_DEFAULT_TF = "5"
+
+def _load_subscribers():
+    try:
+        if os.path.exists(SUBSCRIBERS_FILE):
+            with open(SUBSCRIBERS_FILE) as f:
+                data = json.load(f)
+                return set(data.get("subscribers", [])), data.get("auto_tf", {})
+    except: pass
+    return set(), {}
+
+def _save_subscribers():
+    try:
+        with open(SUBSCRIBERS_FILE, "w") as f:
+            json.dump({"subscribers": list(_subscribers),
+                       "auto_tf": {str(k): v for k,v in _auto_tf.items()}}, f)
+    except: pass
+
+_subscribers, _auto_tf = _load_subscribers()
 
 # ══ АЛЕРТ РОЗВОРОТУ: останній сигнал користувача ══════
 # {chat_id: {"pair":..., "tf":..., "is_buy":..., "entry":..., "sent_at":...}}
@@ -44,6 +64,8 @@ def save_journal(d):
 
 all_journal = load_journal()
 
+MAX_JOURNAL_PER_USER = 500  # максимум записів на користувача
+
 def add_journal_entry(cid, pair, tf, direction, acc, entry_price, result=None, pnl=None):
     k = str(cid)
     if k not in all_journal:
@@ -51,15 +73,15 @@ def add_journal_entry(cid, pair, tf, direction, acc, entry_price, result=None, p
     entry = {
         "id": len(all_journal[k]) + 1,
         "time": datetime.now(timezone(timedelta(hours=3))).strftime("%H:%M %d.%m.%Y"),
-        "pair": pair,
-        "tf": tf,
+        "pair": pair, "tf": tf,
         "dir": "UP" if direction else "DOWN",
-        "acc": acc,
-        "entry": entry_price,
-        "result": result,
-        "pnl": pnl
+        "acc": acc, "entry": entry_price,
+        "result": result, "pnl": pnl
     }
     all_journal[k].append(entry)
+    # Обмежуємо розмір журналу
+    if len(all_journal[k]) > MAX_JOURNAL_PER_USER:
+        all_journal[k] = all_journal[k][-MAX_JOURNAL_PER_USER:]
     save_journal(all_journal)
     return entry
 
@@ -194,21 +216,43 @@ def check_reversal(cid, pair_name, tf):
     return False, ""
 
 def reversal_monitor():
-    """Фоновий потік — слідкує за розворотами для всіх активних сигналів"""
+    """Фоновий потік — слідкує за розворотами.
+    Використовує тільки КЕШОВАНІ дані щоб не витрачати API ліміт."""
+    CHECK_INTERVAL = 600  # перевіряємо кожні 10 хв (не 1 хв!)
+    _last_checked = {}    # {pair_tf: timestamp} — коли востаннє перевіряли
+
     while True:
         try:
+            now = time.time()
             for k, last in list(_last_signals.items()):
-                cid = int(k)
-                pair = last.get("pair")
-                tf = last.get("tf")
+                cid   = int(k)
+                pair  = last.get("pair")
+                tf    = last.get("tf")
                 sent_at = last.get("sent_at", 0)
+
                 if not pair or not tf:
                     continue
-                # Перевіряємо тільки якщо сигнал свіжий (до 2 годин)
-                if time.time() - sent_at > 7200:
+                # Видаляємо старі записи (> 2 години)
+                if now - sent_at > 7200:
                     _last_signals.pop(k, None)
                     continue
-                sig = generate_signal(pair, tf)
+
+                # Перевіряємо не частіше ніж раз на CHECK_INTERVAL
+                check_key = f"{pair}_{tf}"
+                if now - _last_checked.get(check_key, 0) < CHECK_INTERVAL:
+                    continue
+                _last_checked[check_key] = now
+
+                # Використовуємо кеш якщо є — не робимо нових API запитів
+                from_cache = _cache.get(f"{pair}_{tf}")
+                if not from_cache:
+                    continue  # немає кешу — пропускаємо, не витрачаємо API
+
+                try:
+                    sig = generate_signal(pair, tf)
+                except:
+                    continue
+
                 if sig and sig["is_buy"] != last["is_buy"]:
                     old = "⬆️ ВВЕРХ" if last["is_buy"] else "⬇️ ВНИЗ"
                     new = "⬆️ ВВЕРХ" if sig["is_buy"] else "⬇️ ВНИЗ"
@@ -226,7 +270,7 @@ def reversal_monitor():
                     _last_signals.pop(k, None)
         except:
             pass
-        time.sleep(60)  # перевіряємо кожну хвилину
+        time.sleep(120)  # основний цикл — кожні 2 хв
 
 # ══ АВТО-СИГНАЛИ ══════════════════════════════════════
 def auto_signal_loop():
@@ -335,11 +379,31 @@ def save_stats(d):
             with open(STATS_FILE,"w") as f: json.dump(d,f)
         except: pass
 all_stats=load_stats()
+
+# ══ RATE LIMITING ═════════════════════════════════════
+_rl_last = {}   # cid -> timestamp
+_rl_count = {}  # cid -> (count, window)
+RATE_SEC = 3; RATE_MIN = 20
+MAX_USERS = 500; MAX_PAIRS = 50
+
+def check_rate_limit(cid):
+    now = time.time(); k = str(cid)
+    if now - _rl_last.get(k, 0) < RATE_SEC: return False
+    cnt, win = _rl_count.get(k, (0, now))
+    if now - win > 60: cnt, win = 0, now
+    if cnt >= RATE_MIN: return False
+    _rl_last[k] = now; _rl_count[k] = (cnt+1, win)
+    return True
+
 def get_stats(cid):
     k=str(cid)
     if k not in all_stats:
+        if len(all_stats) >= MAX_USERS:
+            oldest = min(all_stats, key=lambda x: all_stats[x].get("total", 0))
+            del all_stats[oldest]
         all_stats[k]={"total":0,"wins":0,"losses":0,"streak":0,"pairs":{}}
     return all_stats[k]
+
 def save_user_stats(): save_stats(all_stats)
 
 # ══ МАТЕМАТИКА ════════════════════════════════════════
@@ -1137,6 +1201,20 @@ def send_main(cid,mid=None):
     bot.send_message(cid,txt,parse_mode="Markdown",reply_markup=main_kb())
 
 def do_signal(cid,mid,pair,tf):
+    # Валідація pair і tf
+    if pair not in ALL_PAIRS:
+        try: bot.edit_message_text("❌ Невідома пара",cid,mid,reply_markup=main_kb())
+        except: pass
+        return
+    if tf not in {**TIMEFRAMES,**CRYPTO_TF,**STOCKS_TF}:
+        try: bot.edit_message_text("❌ Невідомий таймфрейм",cid,mid,reply_markup=main_kb())
+        except: pass
+        return
+    # Rate limit
+    if not check_rate_limit(cid):
+        try: bot.edit_message_text("⏳ Зачекайте кілька секунд перед наступним запитом",cid,mid,reply_markup=main_kb())
+        except: pass
+        return
     tf_lbl=TIMEFRAMES.get(tf,CRYPTO_TF.get(tf,tf+"хв"))
     steps=[("⟳ Завантаження даних...","▰▰▰▱▱▱▱▱▱▱ 30%"),
            ("⟳ HA + PSAR + Fibonacci...","▰▰▰▰▰▰▱▱▱▱ 60%"),
@@ -1284,9 +1362,11 @@ def cmd_subscribe(msg):
     cid = msg.chat.id
     if cid in _subscribers:
         _subscribers.discard(cid)
+        _save_subscribers()
         bot.send_message(cid, "🔕 *Авто-сигнали вимкнено*\n\nНадсилай /auto щоб увімкнути знову.", parse_mode="Markdown")
     else:
         _subscribers.add(cid)
+        _save_subscribers()
         bot.send_message(cid,
             "🔔 *Авто-сигнали увімкнено!*\n\n"
             "⚡ Найсильніші сигнали (≥85%) будуть надходити автоматично кожні 5 хвилин.\n\n"
@@ -1357,9 +1437,11 @@ def cmd_text(msg):
         elif action == "auto_signals":
             if cid in _subscribers:
                 _subscribers.discard(cid)
+                _save_subscribers()
                 bot.send_message(cid, "🔕 *Авто-сигнали вимкнено*", parse_mode="Markdown")
             else:
                 _subscribers.add(cid)
+                _save_subscribers()
                 bot.send_message(cid, "🔔 *Авто-сигнали увімкнено!*\nСигнали ≥85% кожні 5 хвилин.", parse_mode="Markdown")
         elif action == "journal":
             cmd_journal(msg)
@@ -1436,11 +1518,15 @@ def handle_cb(call):
                 cid,mid,parse_mode="Markdown",reply_markup=main_kb())
         elif d.startswith("pair_"):
             pair=d[5:]
+            if pair not in ALL_PAIRS:
+                bot.answer_callback_query(call.id, "❌ Невідома пара"); return
             bot.edit_message_text(f"⏱ *Таймфрейм для {pair}*\nОберіть:",cid,mid,parse_mode="Markdown",reply_markup=tf_kb(pair))
         elif d.startswith("tf|"):
             parts = d.split("|", 2)
             if len(parts) == 3:
                 _,pair,tf = parts
+                if pair not in ALL_PAIRS or tf not in {**TIMEFRAMES,**CRYPTO_TF,**STOCKS_TF}:
+                    bot.answer_callback_query(call.id, "❌ Некоректні дані"); return
                 threading.Thread(target=do_signal,args=(cid,mid,pair,tf),daemon=True).start()
         elif d.startswith(("win|","loss|")):
             parts = d.split("|", 2)
