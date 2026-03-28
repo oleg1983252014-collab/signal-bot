@@ -8,34 +8,50 @@ from datetime import datetime, timezone, timedelta
 from telebot import TeleBot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-BOT_TOKEN  = "8542231431:AAHJ-9Rwr_taqFMaBd9YBau8bVcMU38633Y"
-TWELVE_KEY = os.environ.get("TWELVE_KEY")
-if not TWELVE_KEY:
-    TWELVE_KEY = "99b3ca01dbdf45ccb2f5968b16af1c82"
+BOT_TOKEN  = os.environ.get("BOT_TOKEN", "8542231431:AAHJ-9Rwr_taqFMaBd9YBau8bVcMU38633Y")
+TWELVE_KEY = os.environ.get("TWELVE_KEY", "99b3ca01dbdf45ccb2f5968b16af1c82")
 
-KYIV = timezone(timedelta(hours=2))  # ← ДОДАНО
+KYIV = timezone(timedelta(hours=2))
 
-# ══ РОЗРАХУНОК ЧАСУ ВХОДУ ══════════════════════════════
+# ══ РОЗРАХУНОК ЧАСУ ВІДКРИТТЯ ТА ВХОДУ В УГОДУ ═══════
 def get_entry_time(tf: str):
     """
-    Повертає (час_входу, час_виходу, рядок_до_закриття)
-    Час входу = початок НАСТУПНОЇ свічки
+    Повертає (час_відкриття_угоди, час_входу, час_виходу, рядок_до_закриття)
+    Час відкриття = зараз (поточний момент)
+    Час входу     = початок НАСТУПНОЇ свічки
+    Час виходу    = кінець наступної свічки
     """
     try:
         mins = int(tf)
     except:
         mins = 5
+
     now = datetime.now(KYIV)
-    current_start  = (now.minute // mins) * mins
-    next_min       = current_start + mins
-    entry_dt       = now.replace(second=0, microsecond=0, minute=0) + timedelta(minutes=next_min)
-    exit_dt        = entry_dt + timedelta(minutes=mins)
-    seconds_in     = mins * 60
-    seconds_past   = (now.minute % mins) * 60 + now.second
-    closes_in      = seconds_in - seconds_past
-    closes_min     = closes_in // 60
-    closes_sec     = closes_in % 60
+    open_time = now.strftime("%H:%M:%S")  # точний час відкриття угоди
+
+    # Для таймфреймів >= 60хв рахуємо по годинах
+    if mins >= 60:
+        hours = mins // 60
+        current_hour_block = (now.hour // hours) * hours
+        next_hour_block    = current_hour_block + hours
+        entry_dt = now.replace(second=0, microsecond=0, minute=0, hour=0) + timedelta(hours=next_hour_block)
+        exit_dt  = entry_dt + timedelta(hours=hours)
+        total_secs  = hours * 3600
+        passed_secs = (now.hour % hours) * 3600 + now.minute * 60 + now.second
+    else:
+        current_start = (now.minute // mins) * mins
+        next_min      = current_start + mins
+        entry_dt      = now.replace(second=0, microsecond=0, minute=0) + timedelta(minutes=next_min)
+        exit_dt       = entry_dt + timedelta(minutes=mins)
+        total_secs    = mins * 60
+        passed_secs   = (now.minute % mins) * 60 + now.second
+
+    closes_in  = max(0, total_secs - passed_secs)
+    closes_min = closes_in // 60
+    closes_sec = closes_in % 60
+
     return (
+        open_time,
         entry_dt.strftime("%H:%M"),
         exit_dt.strftime("%H:%M"),
         f"{closes_min}хв {closes_sec:02d}с"
@@ -299,9 +315,6 @@ def auto_signal_loop():
 
 TWELVE_URL = "https://api.twelvedata.com"
 STATS_FILE = "stats.json"
-
-if not BOT_TOKEN:
-    raise ValueError("❌ BOT_TOKEN не встановлено!")
 
 bot = TeleBot(BOT_TOKEN)
 
@@ -849,8 +862,8 @@ def format_signal(pair, tf, d):
     now_dt = datetime.now(KYIV)
     tf_lbl = TIMEFRAMES.get(tf, CRYPTO_TF.get(tf, STOCKS_TF.get(tf, tf+"хв")))
 
-    # ── РОЗРАХУНОК ЧАСУ ВХОДУ ──────────────────────────
-    entry_time, exit_time, closes_in_str = get_entry_time(tf)
+    # ── РОЗРАХУНОК ЧАСУ ВІДКРИТТЯ ТА ВХОДУ ────────────
+    open_time, entry_time, exit_time, closes_in_str = get_entry_time(tf)
     # ────────────────────────────────────────────────────
 
     is_buy   = d["is_buy"]
@@ -910,10 +923,11 @@ def format_signal(pair, tf, d):
         f"🏷 *{pair}*  ⏱ {tf_lbl}  {src}",
         f"📍 {d['sess']}",
         "",
-        # ── ЧАС ВХОДУ ──────────────────────────────────
+        # ── ЧАС ВІДКРИТТЯ ТА ВХОДУ ─────────────────────
+        f"🕐 *Час відкриття угоди: {open_time}*",
         f"⏰ Свічка закриється через: *{closes_in_str}*",
-        f"🚀 *Час входу: {entry_time}*",
-        f"🏁 *Час виходу: {exit_time}*",
+        f"🚀 *Вхід (наступна свічка): {entry_time}*",
+        f"🏁 *Вихід з угоди: {exit_time}*",
         # ────────────────────────────────────────────────
         "",
         f"📈 *Сила тренду* — {t_str} *{t_pct}%*",
@@ -1335,28 +1349,33 @@ if __name__=="__main__":
     print("✅ SIGNAL AI Bot v2.0 запущено!")
     threading.Thread(target=auto_signal_loop, daemon=True).start()
     threading.Thread(target=reversal_monitor, daemon=True).start()
-    for attempt in range(8):
+    # ── Зачищаємо попередні сесії ──────────────────────
+    for attempt in range(10):
         try: bot.close()
         except: pass
         try:
             bot.delete_webhook(drop_pending_updates=True)
-            logger.info("Webhook видалено"); break
+            logger.info("✅ Webhook видалено"); break
         except Exception as e:
             logger.warning(f"delete_webhook спроба {attempt+1}: {e}")
-            time.sleep(3 + attempt * 2)
-    logger.info("Чекаємо 15 сек...")
-    time.sleep(15)
+            time.sleep(5 + attempt * 3)
+    logger.info("⏳ Чекаємо 20 сек перед polling...")
+    time.sleep(20)
+    # ── Головний цикл polling ──────────────────────────
     while True:
         try:
-            logger.info("Starting polling...")
+            logger.info("🚀 Starting polling...")
             bot.infinity_polling(timeout=25, long_polling_timeout=20,
                 skip_pending=True, none_stop=True, restart_on_change=False,
                 allowed_updates=["message","callback_query"])
         except Exception as e:
             err = str(e)
             logger.error(f"Polling crashed: {err}")
-            if "409" in err: time.sleep(30)
-            else: time.sleep(10)
+            if "409" in err:
+                logger.warning("⚠️ 409 Conflict — чекаємо 60 сек...")
+                time.sleep(60)
+            else:
+                time.sleep(10)
             try: bot.close()
             except: pass
             try: bot.delete_webhook(drop_pending_updates=True); time.sleep(5)
