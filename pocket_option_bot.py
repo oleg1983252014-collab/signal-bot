@@ -8,13 +8,41 @@ from datetime import datetime, timezone, timedelta
 from telebot import TeleBot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-BOT_TOKEN  = os.environ.get("BOT_TOKEN")
+BOT_TOKEN  = "8542231431:AAHJ-9Rwr_taqFMaBd9YBau8bVcMU38633Y"
 TWELVE_KEY = os.environ.get("TWELVE_KEY")
 if not TWELVE_KEY:
-    TWELVE_KEY = "99b3ca01dbdf45ccb2f5968b16af1c82"  # резерв для локального запуску
+    TWELVE_KEY = "99b3ca01dbdf45ccb2f5968b16af1c82"
+
+KYIV = timezone(timedelta(hours=2))  # ← ДОДАНО
+
+# ══ РОЗРАХУНОК ЧАСУ ВХОДУ ══════════════════════════════
+def get_entry_time(tf: str):
+    """
+    Повертає (час_входу, час_виходу, рядок_до_закриття)
+    Час входу = початок НАСТУПНОЇ свічки
+    """
+    try:
+        mins = int(tf)
+    except:
+        mins = 5
+    now = datetime.now(KYIV)
+    current_start  = (now.minute // mins) * mins
+    next_min       = current_start + mins
+    entry_dt       = now.replace(second=0, microsecond=0, minute=0) + timedelta(minutes=next_min)
+    exit_dt        = entry_dt + timedelta(minutes=mins)
+    seconds_in     = mins * 60
+    seconds_past   = (now.minute % mins) * 60 + now.second
+    closes_in      = seconds_in - seconds_past
+    closes_min     = closes_in // 60
+    closes_sec     = closes_in % 60
+    return (
+        entry_dt.strftime("%H:%M"),
+        exit_dt.strftime("%H:%M"),
+        f"{closes_min}хв {closes_sec:02d}с"
+    )
 
 # ══ АВТО-СИГНАЛИ: список підписників ══════════════════
-SUBSCRIBERS_FILE = "subscribers.json"   # зберігаємо підписників між рестартами
+SUBSCRIBERS_FILE = "subscribers.json"
 _subscribers = set()
 _auto_tf     = {}
 AUTO_DEFAULT_TF = "5"
@@ -37,11 +65,8 @@ def _save_subscribers():
 
 _subscribers, _auto_tf = _load_subscribers()
 
-# ══ АЛЕРТ РОЗВОРОТУ: останній сигнал користувача ══════
-# {chat_id: {"pair":..., "tf":..., "is_buy":..., "entry":..., "sent_at":...}}
 _last_signals = {}
 
-# ══ ЖУРНАЛ УГОД ═══════════════════════════════════════
 JOURNAL_FILE = "journal.json"
 _journal_lock = threading.Lock()
 
@@ -63,8 +88,7 @@ def save_journal(d):
             pass
 
 all_journal = load_journal()
-
-MAX_JOURNAL_PER_USER = 500  # максимум записів на користувача
+MAX_JOURNAL_PER_USER = 500
 
 def add_journal_entry(cid, pair, tf, direction, acc, entry_price, result=None, pnl=None):
     k = str(cid)
@@ -72,14 +96,13 @@ def add_journal_entry(cid, pair, tf, direction, acc, entry_price, result=None, p
         all_journal[k] = []
     entry = {
         "id": len(all_journal[k]) + 1,
-        "time": datetime.now(timezone(timedelta(hours=3))).strftime("%H:%M %d.%m.%Y"),
+        "time": datetime.now(KYIV).strftime("%H:%M %d.%m.%Y"),
         "pair": pair, "tf": tf,
         "dir": "UP" if direction else "DOWN",
         "acc": acc, "entry": entry_price,
         "result": result, "pnl": pnl
     }
     all_journal[k].append(entry)
-    # Обмежуємо розмір журналу
     if len(all_journal[k]) > MAX_JOURNAL_PER_USER:
         all_journal[k] = all_journal[k][-MAX_JOURNAL_PER_USER:]
     save_journal(all_journal)
@@ -88,21 +111,11 @@ def add_journal_entry(cid, pair, tf, direction, acc, entry_price, result=None, p
 def get_journal(cid, limit=10):
     return all_journal.get(str(cid), [])[-limit:]
 
-# ══ MONEY MANAGEMENT ══════════════════════════════════
 def calc_money_management(acc, balance=100):
-    """Розраховує розмір ставки залежно від точності сигналу"""
-    if acc >= 88:
-        pct = 5
-        label = "🔥 Сильний сигнал"
-    elif acc >= 80:
-        pct = 3
-        label = "✅ Середній сигнал"
-    elif acc >= 74:
-        pct = 2
-        label = "⚠️ Слабкий сигнал"
-    else:
-        pct = 0
-        label = "⛔ Не торгувати"
+    if acc >= 88:   pct = 5; label = "🔥 Сильний сигнал"
+    elif acc >= 80: pct = 3; label = "✅ Середній сигнал"
+    elif acc >= 74: pct = 2; label = "⚠️ Слабкий сигнал"
+    else:           pct = 0; label = "⛔ Не торгувати"
     amount = round(balance * pct / 100, 2)
     return pct, amount, label
 
@@ -117,12 +130,10 @@ def mm_text(acc, balance=100):
         f"При $100 → *${amount}*\n"
     )
 
-# ══ ФІЛЬТР НОВИН ══════════════════════════════════════
 _news_cache = {"time": 0, "events": []}
-NEWS_CACHE_SEC = 600  # оновлювати кожні 10 хвилин
+NEWS_CACHE_SEC = 600
 
 def fetch_news_events():
-    """Отримує важливі новини з ForexFactory через RSS"""
     now = time.time()
     if now - _news_cache["time"] < NEWS_CACHE_SEC:
         return _news_cache["events"]
@@ -145,7 +156,6 @@ def fetch_news_events():
         return []
 
 def check_news_filter(pair_name):
-    """Перевіряє чи є новини ±30 хвилин від поточного часу"""
     try:
         events = fetch_news_events()
         if not events:
@@ -163,9 +173,7 @@ def check_news_filter(pair_name):
         pass
     return False, ""
 
-# ══ МУЛЬТИ-ТАЙМФРЕЙМ MTF ══════════════════════════════
 def mtf_analysis(pair_name):
-    """Аналізує пару на 3 таймфреймах і повертає консенсус"""
     tfs = ["5", "15", "60"]
     results = {}
     for tf in tfs:
@@ -185,20 +193,13 @@ def mtf_analysis(pair_name):
         arrow = "⬆️" if sig["is_buy"] else "⬇️"
         lines.append(f"{arrow} {tf_labels[tf]}: {sig['acc']}%")
     summary = "\n".join(lines)
-    if agree == 3:
-        return 1, f"🟢 *MTF: Всі 3 ТФ — ВВЕРХ*\n{summary}"
-    elif agree == -3:
-        return -1, f"🔴 *MTF: Всі 3 ТФ — ВНИЗ*\n{summary}"
-    elif agree >= 1:
-        return 1, f"🟡 *MTF: 2/3 ТФ — ВВЕРХ*\n{summary}"
-    elif agree <= -1:
-        return -1, f"🟡 *MTF: 2/3 ТФ — ВНИЗ*\n{summary}"
-    else:
-        return 0, f"⚪ *MTF: Суперечливі сигнали*\n{summary}"
+    if agree == 3:   return 1,  f"🟢 *MTF: Всі 3 ТФ — ВВЕРХ*\n{summary}"
+    elif agree == -3: return -1, f"🔴 *MTF: Всі 3 ТФ — ВНИЗ*\n{summary}"
+    elif agree >= 1:  return 1,  f"🟡 *MTF: 2/3 ТФ — ВВЕРХ*\n{summary}"
+    elif agree <= -1: return -1, f"🟡 *MTF: 2/3 ТФ — ВНИЗ*\n{summary}"
+    else:             return 0,  f"⚪ *MTF: Суперечливі сигнали*\n{summary}"
 
-# ══ АЛЕРТ РОЗВОРОТУ ═══════════════════════════════════
 def check_reversal(cid, pair_name, tf):
-    """Перевіряє чи змінився напрямок відносно попереднього сигналу"""
     k = str(cid)
     if k not in _last_signals:
         return False, ""
@@ -216,11 +217,8 @@ def check_reversal(cid, pair_name, tf):
     return False, ""
 
 def reversal_monitor():
-    """Фоновий потік — слідкує за розворотами.
-    Використовує тільки КЕШОВАНІ дані щоб не витрачати API ліміт."""
-    CHECK_INTERVAL = 600  # перевіряємо кожні 10 хв (не 1 хв!)
-    _last_checked = {}    # {pair_tf: timestamp} — коли востаннє перевіряли
-
+    CHECK_INTERVAL = 600
+    _last_checked = {}
     while True:
         try:
             now = time.time()
@@ -229,30 +227,22 @@ def reversal_monitor():
                 pair  = last.get("pair")
                 tf    = last.get("tf")
                 sent_at = last.get("sent_at", 0)
-
                 if not pair or not tf:
                     continue
-                # Видаляємо старі записи (> 2 години)
                 if now - sent_at > 7200:
                     _last_signals.pop(k, None)
                     continue
-
-                # Перевіряємо не частіше ніж раз на CHECK_INTERVAL
                 check_key = f"{pair}_{tf}"
                 if now - _last_checked.get(check_key, 0) < CHECK_INTERVAL:
                     continue
                 _last_checked[check_key] = now
-
-                # Використовуємо кеш якщо є — не робимо нових API запитів
-                from_cache = _cache.get(f"{pair}_{tf}")
+                from_cache = _candle_cache.get(f"{pair}_{tf}")
                 if not from_cache:
-                    continue  # немає кешу — пропускаємо, не витрачаємо API
-
+                    continue
                 try:
                     sig = generate_signal(pair, tf)
                 except:
                     continue
-
                 if sig and sig["is_buy"] != last["is_buy"]:
                     old = "⬆️ ВВЕРХ" if last["is_buy"] else "⬇️ ВНИЗ"
                     new = "⬆️ ВВЕРХ" if sig["is_buy"] else "⬇️ ВНИЗ"
@@ -270,13 +260,11 @@ def reversal_monitor():
                     _last_signals.pop(k, None)
         except:
             pass
-        time.sleep(120)  # основний цикл — кожні 2 хв
+        time.sleep(120)
 
-# ══ АВТО-СИГНАЛИ ══════════════════════════════════════
 def auto_signal_loop():
-    """Надсилає авто-сигнали підписникам кожні 5 хвилин"""
     while True:
-        time.sleep(300)  # 5 хвилин
+        time.sleep(300)
         if not _subscribers:
             continue
         scan_pairs = FOREX_PAIRS[:6] + OTC_PAIRS[:4] + CRYPTO_PAIRS[:3]
@@ -290,7 +278,7 @@ def auto_signal_loop():
             except:
                 pass
         results.sort(key=lambda x: -x[2]["acc"])
-        best = results[:2]  # максимум 2 сигнали
+        best = results[:2]
         if not best:
             continue
         for cid in list(_subscribers):
@@ -298,9 +286,7 @@ def auto_signal_loop():
                 bot.send_message(cid, "⚡ *Авто-сигнали SIGNAL AI*", parse_mode="Markdown")
                 for pair, tf, sig in best:
                     txt = format_signal(pair, tf, sig)
-                    mm = mm_text(sig["acc"])
-                    full_txt = txt + mm
-                    bot.send_message(cid, full_txt, parse_mode="Markdown",
+                    bot.send_message(cid, txt, parse_mode="Markdown",
                                      reply_markup=result_kb(pair, tf))
                     _last_signals[str(cid)] = {
                         "pair": pair, "tf": tf,
@@ -310,15 +296,15 @@ def auto_signal_loop():
                     time.sleep(0.5)
             except:
                 pass
+
 TWELVE_URL = "https://api.twelvedata.com"
 STATS_FILE = "stats.json"
 
 if not BOT_TOKEN:
-    raise ValueError("❌ BOT_TOKEN не встановлено! Додай змінну середовища BOT_TOKEN.")
+    raise ValueError("❌ BOT_TOKEN не встановлено!")
 
 bot = TeleBot(BOT_TOKEN)
 
-# ══ ПАРИ ══════════════════════════════════════════════
 FOREX_PAIRS=[
     {"name":"EUR/USD","symbol":"EUR/USD","p":1.08,"d":5},
     {"name":"GBP/USD","symbol":"GBP/USD","p":1.27,"d":5},
@@ -365,7 +351,6 @@ TIMEFRAMES={"1":"1 хв","3":"3 хв","5":"5 хв","15":"15 хв","30":"30 хв"
 CRYPTO_TF={"5":"5 хв","15":"15 хв","30":"30 хв","60":"1 год","240":"4 год"}
 STOCKS_TF={"5":"5 хв","15":"15 хв","30":"30 хв","60":"1 год"}
 
-# ══ СТАТИСТИКА ════════════════════════════════════════
 _lock=threading.Lock()
 def load_stats():
     try:
@@ -380,9 +365,8 @@ def save_stats(d):
         except: pass
 all_stats=load_stats()
 
-# ══ RATE LIMITING ═════════════════════════════════════
-_rl_last = {}   # cid -> timestamp
-_rl_count = {}  # cid -> (count, window)
+_rl_last = {}
+_rl_count = {}
 RATE_SEC = 3; RATE_MIN = 20
 MAX_USERS = 500; MAX_PAIRS = 50
 
@@ -406,7 +390,6 @@ def get_stats(cid):
 
 def save_user_stats(): save_stats(all_stats)
 
-# ══ МАТЕМАТИКА ════════════════════════════════════════
 def ema(a,p):
     if len(a)<p: return a[-1] if a else 0
     k=2/(p+1); v=sum(a[:p])/p
@@ -473,10 +456,7 @@ def calc_momentum(c,p=10):
     if len(c)<p+1: return 0
     return round((c[-1]-c[-p-1])/c[-p-1]*100,3) if c[-p-1] else 0
 
-# ══ НОВІ ІНДИКАТОРИ ═══════════════════════════════════
-
 def calc_heikin_ashi(o,c,h,l):
-    """Heikin Ashi — фільтрує шум, найкращий для 3-5хв"""
     if len(c)<3: return 0,""
     ha_c=[(o[i]+h[i]+l[i]+c[i])/4 for i in range(len(c))]
     ha_o=[0]*len(c); ha_o[0]=(o[0]+c[0])/2
@@ -497,7 +477,6 @@ def calc_heikin_ashi(o,c,h,l):
     return 0,"HA: нейтраль"
 
 def calc_parabolic_sar(h,l,af0=0.02,afm=0.2):
-    """Parabolic SAR — розворот тренду"""
     if len(h)<5: return 0,""
     bull=l[0]<l[1]; sar=l[0] if bull else h[0]; ep=h[0] if bull else l[0]; af=af0
     prev_bull=bull
@@ -518,7 +497,6 @@ def calc_parabolic_sar(h,l,af0=0.02,afm=0.2):
     return (1,"PSAR: бичячий ▲") if bull else (-1,"PSAR: ведмежий ▼")
 
 def calc_fibonacci(h,l,c,lb=30):
-    """Fibonacci retracement рівні"""
     if len(h)<lb: lb=len(h)
     rh=max(h[-lb:]); rl=min(l[-lb:]); diff=rh-rl
     if diff<1e-9: return 0,"",[]
@@ -559,35 +537,28 @@ def sr_signal(price,sup,res,atr):
         if price<s and s-price<z*2: return -1,"Пробій підтримки ▼"
     return 0,""
 
-# ══ СЕСІЯ ════════════════════════════════════════════
 def get_session():
     h=datetime.now(timezone.utc).hour
-    if 7<=h<9:   return "Лондон відкриття 🟢","excellent",1.15
+    if 7<=h<9:    return "Лондон відкриття 🟢","excellent",1.15
     elif 9<=h<12: return "Лондон+NY 🟢","excellent",1.20
     elif 12<=h<16: return "Нью-Йорк 🟡","good",1.10
     elif 16<=h<18: return "NY закриття 🟡","average",0.95
     elif 18<=h<21: return "Між сесіями 🔴","poor",0.80
     elif 21<=h<23: return "Токіо 🟡","average",0.90
-    else:           return "Нічна сесія 🔴","poor",0.75
+    else:          return "Нічна сесія 🔴","poor",0.75
 
-# ══ API ═══════════════════════════════════════════════
-# ══ КЕШ СВІЧОК ════════════════════════════════════════
-# Зберігає дані на TF_CACHE_SEC секунд — економить API запити
-_candle_cache = {}  # {symbol+tf: (timestamp, c, h, l, o)}
+_candle_cache = {}
 TF_CACHE_SEC = {"1":30,"3":90,"5":150,"15":300,"30":600,"60":1200,"240":2400}
 
 def get_candles(symbol,tf,count=100):
     cache_key = f"{symbol}_{tf}"
     ttl = TF_CACHE_SEC.get(tf, 150)
-    # Перевірка кешу
     if cache_key in _candle_cache:
         ts, c, h, l, o = _candle_cache[cache_key]
         if time.time() - ts < ttl:
             return c, h, l, o
     tf_map={"1":"1min","3":"3min","5":"5min","15":"15min","30":"30min","60":"1h","240":"4h"}
     interval=tf_map.get(tf,"5min")
-    # Для акцій не додаємо /
-    is_forex="/" in symbol and not any(symbol.startswith(c) for c in ["BTC","ETH","BNB","SOL","XRP","ADA","DOGE","LTC"])
     try:
         url=f"{TWELVE_URL}/time_series?symbol={symbol}&interval={interval}&outputsize={count}&apikey={TWELVE_KEY}&format=JSON"
         r=requests.get(url,timeout=12); d=r.json()
@@ -597,7 +568,6 @@ def get_candles(symbol,tf,count=100):
         h=[float(v["high"]) for v in vals]
         l=[float(v["low"]) for v in vals]
         o=[float(v["open"]) for v in vals]
-        # Зберігаємо в кеш
         _candle_cache[cache_key] = (time.time(), c, h, l, o)
         return c,h,l,o
     except: return [],[],[],[]
@@ -610,16 +580,13 @@ def get_price(symbol,fb):
     except: pass
     return fb
 
-# ══ ГЕНЕРАЦІЯ СИГНАЛУ ═════════════════════════════════
 def generate_signal(pair_name,tf):
     m=ALL_PAIRS.get(pair_name,FOREX_PAIRS[0])
     is_otc="OTC" in pair_name
     c,h,l,o=get_candles(m["symbol"],tf,100)
     real=len(c)>=20
     live=get_price(m["symbol"],m["p"])
-
     if not real:
-        # Fallback — псевдорандом на основі пари+часу
         seed=sum(ord(x) for x in pair_name)+(int(tf) if tf.isdigit() else 5)*7+int(time.time()//300)
         def sr(i): v=math.sin(seed*1.1+i*0.7)*43758.5453; return v-math.floor(v)
         base=live; cv=[base]; hv=[base]; lv=[base]; ov=[base]
@@ -629,8 +596,6 @@ def generate_signal(pair_name,tf):
             hi=max(op,cl)*(1+sr(i+30)*0.001); lo=min(op,cl)*(1-sr(i+40)*0.001)
             ov.append(op); cv.append(cl); hv.append(hi); lv.append(lo)
         c,h,l,o=cv,hv,lv,ov
-
-    # Розраховуємо всі індикатори
     rsi      = calc_rsi(c)
     macd,mh  = calc_macd(c)
     e9=ema(c,9); e21=ema(c,21); e50=ema(c,50)
@@ -641,16 +606,12 @@ def generate_signal(pair_name,tf):
     adx      = calc_adx(c,h,l)
     atr      = calc_atr(c,h,l)
     mom      = calc_momentum(c)
-
-    # НОВІ ══════════════════════════════
     ha_val, ha_lbl         = calc_heikin_ashi(o,c,h,l)
     psar_val, psar_lbl     = calc_parabolic_sar(h,l)
     fib_val, fib_lbl, _    = calc_fibonacci(h,l,c)
     sup, res               = calc_support_resistance(c,h,l)
     sr_val, sr_lbl         = sr_signal(live,sup,res,atr)
     sess_name, sess_q, sess_mult = get_session()
-
-    # Свічковий патерн
     def candle_pat():
         if len(c)<3: return 0,""
         b2=abs(c[-2]-o[-2]); r2=max(1e-9,h[-2]-l[-2])
@@ -668,13 +629,8 @@ def generate_signal(pair_name,tf):
         if doji and c[-1]<o[-1]: return -1,"🕯 Доджі→SELL"
         return 0,""
     pat_val, pat_lbl = candle_pat()
-
-    # ГОЛОСУВАННЯ З ВАГАМИ ══════════════
     votes=[]
-    def v(n,val,lbl,w=1.0):
-        votes.append({"n":n,"v":val,"l":lbl,"w":w})
-
-    # RSI
+    def v(n,val,lbl,w=1.0): votes.append({"n":n,"v":val,"l":lbl,"w":w})
     if rsi<25:    v("RSI",1,f"RSI {rsi} — сильна перепроданість 🔥",2.5)
     elif rsi>75:  v("RSI",-1,f"RSI {rsi} — сильна перекупленість 🔥",2.5)
     elif rsi<40:  v("RSI",1,f"RSI {rsi} — перепроданість",2.0)
@@ -682,74 +638,46 @@ def generate_signal(pair_name,tf):
     elif rsi<48:  v("RSI",1,f"RSI {rsi} — бичачий нахил",1.0)
     elif rsi>52:  v("RSI",-1,f"RSI {rsi} — ведмежий нахил",1.0)
     else:         v("RSI",0,f"RSI {rsi} — нейтраль",0.3)
-
-    # MACD
     if macd>0 and mh>0:   v("MACD",1,"MACD: лінія+гіст ▲ ✅",2.0)
     elif macd<0 and mh<0: v("MACD",-1,"MACD: лінія+гіст ▼ ✅",2.0)
     elif mh>0:            v("MACD",1,"MACD: гіст зростає",1.0)
     elif mh<0:            v("MACD",-1,"MACD: гіст падає",1.0)
     else:                 v("MACD",0,"MACD нейтраль",0.3)
-
-    # EMA 9/21
     if e9>e21*1.0002:   v("EMA9/21",1,"EMA9 > EMA21 ▲",2.0)
     elif e9<e21*0.9998: v("EMA9/21",-1,"EMA9 < EMA21 ▼",2.0)
     else:               v("EMA9/21",0,"EMA9 ≈ EMA21",0.3)
-
-    # EMA50
     if live>e50*1.001:   v("EMA50",1,"Ціна вище EMA50",1.5)
     elif live<e50*0.999: v("EMA50",-1,"Ціна нижче EMA50",1.5)
-
-    # Stochastic
     if k_val<20:   v("Stoch",1,f"Stoch {k_val} — перепроданість ✅",2.0)
     elif k_val>80: v("Stoch",-1,f"Stoch {k_val} — перекупленість ✅",2.0)
     elif k_val<45: v("Stoch",1,f"Stoch {k_val} — BUY зона",1.0)
     elif k_val>55: v("Stoch",-1,f"Stoch {k_val} — SELL зона",1.0)
-
-    # BB
     if bb<10:     v("BB",1,"BB нижня смуга BUY 🔥",2.0)
     elif bb>90:   v("BB",-1,"BB верхня смуга SELL 🔥",2.0)
     elif bb<25:   v("BB",1,f"BB нижня зона {bb}%",1.0)
     elif bb>75:   v("BB",-1,f"BB верхня зона {bb}%",1.0)
-
-    # Williams %R
     if willr<-85:   v("W%R",1,f"W%R {willr} — сильна перепроданість 🔥",2.0)
     elif willr>-15: v("W%R",-1,f"W%R {willr} — сильна перекупленість 🔥",2.0)
     elif willr<-60: v("W%R",1,f"W%R {willr} — перепроданість",1.0)
     else:           v("W%R",-1,f"W%R {willr} — перекупленість",1.0)
-
-    # STC — найсильніший
     if stc is not None:
-        if stc<15:      v("STC",1,f"STC {stc} — сильний BUY 🔥🔥",3.5)
-        elif stc>85:    v("STC",-1,f"STC {stc} — сильний SELL 🔥🔥",3.5)
-        elif stc<30:    v("STC",1,f"STC {stc} — BUY зона 🔥",2.5)
-        elif stc>70:    v("STC",-1,f"STC {stc} — SELL зона 🔥",2.5)
-        elif stc<50:    v("STC",1,f"STC {stc} — зростає",1.0)
-        else:           v("STC",-1,f"STC {stc} — падає",1.0)
-
-    # Momentum
+        if stc<15:   v("STC",1,f"STC {stc} — сильний BUY 🔥🔥",3.5)
+        elif stc>85: v("STC",-1,f"STC {stc} — сильний SELL 🔥🔥",3.5)
+        elif stc<30: v("STC",1,f"STC {stc} — BUY зона 🔥",2.5)
+        elif stc>70: v("STC",-1,f"STC {stc} — SELL зона 🔥",2.5)
+        elif stc<50: v("STC",1,f"STC {stc} — зростає",1.0)
+        else:        v("STC",-1,f"STC {stc} — падає",1.0)
     if mom>0.2:    v("Momentum",1,f"Mom +{mom}% бичачий",1.5)
     elif mom<-0.2: v("Momentum",-1,f"Mom {mom}% ведмежий",1.5)
-
-    # Патерн
     if pat_val!=0: v("Патерн",pat_val,pat_lbl,2.0)
-
-    # S/R
-    if sr_val!=0: v("S/R",sr_val,sr_lbl,2.5)
-
-    # HEIKIN ASHI
+    if sr_val!=0:  v("S/R",sr_val,sr_lbl,2.5)
     if ha_val!=0:
         strong="🔥" in ha_lbl
         v("Heikin Ashi",ha_val,ha_lbl,3.5 if strong else 2.5)
-
-    # PARABOLIC SAR
     if psar_val!=0:
         fresh="свіжий" in psar_lbl or "розворот" in psar_lbl
         v("Parab SAR",psar_val,psar_lbl,3.0 if fresh else 2.0)
-
-    # FIBONACCI
     if fib_val!=0: v("Fibonacci",fib_val,fib_lbl,2.0)
-
-    # Ваги для ТФ
     tf_map_w={
         "1":{"Heikin Ashi":1.8,"Parab SAR":1.6,"STC":1.4,"Stoch":1.4,"Momentum":1.5,"MACD":0.6,"EMA50":0.4},
         "3":{"Heikin Ashi":1.6,"Parab SAR":1.5,"STC":1.5,"EMA9/21":1.3,"Stoch":1.3,"Momentum":1.4,"Fibonacci":1.3,"MACD":0.8,"EMA50":0.6},
@@ -761,8 +689,6 @@ def generate_signal(pair_name,tf):
     wm=tf_map_w.get(tf,{})
     for vt in votes:
         if vt["n"] in wm: vt["w"]*=wm[vt["n"]]
-
-    # Підрахунок
     buy_w=sum(x["w"] for x in votes if x["v"]==1)
     sell_w=sum(x["w"] for x in votes if x["v"]==-1)
     bc=sum(1 for x in votes if x["v"]==1)
@@ -771,60 +697,42 @@ def generate_signal(pair_name,tf):
     is_buy=buy_w>=sell_w
     dom=max(buy_w,sell_w)
     ratio=dom/max(1e-9,tot)
-
-    # Консенсус топ
     top_ns=["STC","RSI","EMA9/21","Stoch","Heikin Ashi","Parab SAR","Fibonacci"]
     top_vs=[next((x["v"] for x in votes if x["n"]==n),0) for n in top_ns]
     top_a=[v for v in top_vs if v!=0]
     c_agree=sum(1 for v in top_a if (v==1)==is_buy)
     consensus=f"{c_agree}/{len(top_a)}" if top_a else "—"
-
-    # ADX
     adx_ok=adx>=20
     adx_b=min(12,adx//3) if adx_ok else -5
-
-    # Бонуси
     cons_b=round(c_agree/max(1,len(top_a))*12)
     pat_b=5 if (pat_val==1 and is_buy) or (pat_val==-1 and not is_buy) else 0
     sr_b=6 if (sr_val==1 and is_buy) or (sr_val==-1 and not is_buy) else 0
     tf_b={"1":0,"3":6,"5":5,"15":3,"30":2,"60":1}.get(tf,0)
     ha_b=5 if (ha_val==1 and is_buy) or (ha_val==-1 and not is_buy) else 0
     psar_b=5 if (psar_val==1 and is_buy) or (psar_val==-1 and not is_buy) else 0
-
     acc_raw=round(54+ratio*26+adx_b+cons_b+pat_b+sr_b+tf_b+ha_b+psar_b)
     acc=min(94,max(68,round(acc_raw*sess_mult)))
-
-    # Сила
-    # ── КРИТИЧНИЙ БЛОК STC ─────────────────────────────
-    # STC ≥ 85 при BUY або STC ≤ 15 при SELL — заборона незалежно від решти
     stc_v = next((x["v"] for x in votes if x["n"]=="STC"), 0)
     rsi_v = next((x["v"] for x in votes if x["n"]=="RSI"), 0)
     psar_v= next((x["v"] for x in votes if x["n"]=="Parab SAR"), 0)
     ha_v  = next((x["v"] for x in votes if x["n"]=="Heikin Ashi"), 0)
-
     stc_blocks = (stc is not None) and ((stc>=85 and is_buy) or (stc<=15 and not is_buy))
     rsi_extreme = (rsi>=75 and is_buy) or (rsi<=25 and not is_buy)
     psar_against= psar_v!=0 and (psar_v==1)!=is_buy and ("розворот" in psar_lbl or "свіжий" in psar_lbl)
     ha_against  = ha_v!=0 and (ha_v==1)!=is_buy and "🔥" in ha_lbl
-
     block_reasons=[]
-    if stc_blocks:    block_reasons.append(f"STC={stc:.0f} {'перекупленість' if is_buy else 'перепроданість'}")
-    if rsi_extreme:   block_reasons.append(f"RSI={rsi} {'перекупленість' if is_buy else 'перепроданість'}")
-    if psar_against:  block_reasons.append("PSAR свіжий розворот проти")
-    if ha_against:    block_reasons.append("HA сильний сигнал проти")
-
+    if stc_blocks:   block_reasons.append(f"STC={stc:.0f} {'перекупленість' if is_buy else 'перепроданість'}")
+    if rsi_extreme:  block_reasons.append(f"RSI={rsi} {'перекупленість' if is_buy else 'перепроданість'}")
+    if psar_against: block_reasons.append("PSAR свіжий розворот проти")
+    if ha_against:   block_reasons.append("HA сильний сигнал проти")
     hard_block = stc_blocks or (rsi_extreme and (psar_against or ha_against)) or len(block_reasons)>=2
-
     if hard_block:
-        strength="⛔ НЕ ТОРГУВАТИ"; blocked=True
-        acc=min(acc,60)
+        strength="⛔ НЕ ТОРГУВАТИ"; blocked=True; acc=min(acc,60)
     elif not adx_ok and ratio<0.65: strength="⛔ ФІЛЬТР ADX"; blocked=True
     elif ratio<0.58: strength="⚠️ СЛАБКИЙ"; blocked=False
     elif ratio<0.68: strength="✅ СЕРЕДНІЙ"; blocked=False
     elif ratio<0.80: strength="🔥 СИЛЬНИЙ"; blocked=False
     else:            strength="🔥🔥 ДУЖЕ СИЛЬНИЙ"; blocked=False
-
-    # TP/SL
     d_=m["d"]
     if atr==0: atr=live*0.001
     tp_m={"1":1.3,"3":1.5,"5":1.7,"15":2.0,"30":2.5,"60":3.0}.get(tf,1.7)
@@ -832,7 +740,6 @@ def generate_signal(pair_name,tf):
     tp=round(live+atr*tp_m,d_) if is_buy else round(live-atr*tp_m,d_)
     sl=round(live-atr*sl_m,d_) if is_buy else round(live+atr*sl_m,d_)
     rr=round(tp_m/sl_m,1)
-
     return {"is_buy":is_buy,"acc":acc,"strength":strength,"blocked":blocked,
             "live":live,"tp":tp,"sl":sl,"rr":rr,"adx":adx,"adx_ok":adx_ok,
             "rsi":rsi,"stc":stc,"ha_lbl":ha_lbl,"psar_lbl":psar_lbl,
@@ -841,25 +748,17 @@ def generate_signal(pair_name,tf):
             "consensus":consensus,"sess":sess_name,"sess_q":sess_q,
             "real":real,"is_otc":is_otc,"block_reasons":block_reasons}
 
-
-# ══ ГЕНЕРАЦІЯ ГРАФІКУ ════════════════════════════════
 def generate_chart(pair, tf, c, h, l, o, sig):
-    """Генерує PNG графік свічок з EMA, PSAR, RSI та сигналом"""
     n = min(40, len(c))
     c=c[-n:]; h=h[-n:]; l=l[-n:]; o=o[-n:]
     x = list(range(n))
-
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 7),
         gridspec_kw={'height_ratios': [3, 1]}, facecolor='#0d1424')
-
-    # Свічки
     ax1.set_facecolor('#0d1424')
     for i in range(n):
         col = '#00ff88' if c[i] >= o[i] else '#ff3366'
         ax1.bar(i, abs(c[i]-o[i]), bottom=min(c[i],o[i]), width=0.7, color=col, zorder=3)
         ax1.plot([i,i], [l[i],h[i]], color=col, linewidth=1, zorder=2)
-
-    # EMA 9 та 21
     def ema_arr(data, p):
         if len(data)<p: return [data[0]]*len(data)
         k=2/(p+1); v=sum(data[:p])/p; res=[v]
@@ -869,8 +768,6 @@ def generate_chart(pair, tf, c, h, l, o, sig):
     e9=ema_arr(c,9); e21=ema_arr(c,21)
     ax1.plot(x, e9,  color='#00d4ff', linewidth=1.3, label='EMA9',  zorder=4)
     ax1.plot(x, e21, color='#ffcc00', linewidth=1.3, label='EMA21', zorder=4)
-
-    # Parabolic SAR точки
     def psar_pts(h,l,af0=0.02,afm=0.2):
         if len(h)<3: return []
         bull=l[0]<l[1]; sar=l[0] if bull else h[0]; ep=h[0] if bull else l[0]; af=af0; pts=[]
@@ -888,8 +785,6 @@ def generate_chart(pair, tf, c, h, l, o, sig):
         return pts
     for i,(sv,sb) in enumerate(psar_pts(h,l)):
         ax1.scatter(i+1,sv,color='#00ff88' if sb else '#ff3366',s=8,zorder=5,marker='.')
-
-    # Стрілка сигналу
     is_buy=sig['is_buy']; rng=max(h[-1]-l[-1],0.0001)
     ay = l[-1]-rng*1.2 if is_buy else h[-1]+rng*1.2
     ax1.annotate('', xy=(n-1, l[-1] if is_buy else h[-1]),
@@ -899,15 +794,11 @@ def generate_chart(pair, tf, c, h, l, o, sig):
              f"{'BUY ▲' if is_buy else 'SELL ▼'}  {sig['acc']}%",
              color='#00ff88' if is_buy else '#ff3366',
              fontsize=11, fontweight='bold', ha='center', zorder=10)
-
-    # TP/SL лінії
     dp=sig.get('dp',5)
     ax1.axhline(sig['tp'],color='#00ff88',linewidth=1,linestyle='--',alpha=0.7)
     ax1.axhline(sig['sl'],color='#ff3366',linewidth=1,linestyle='--',alpha=0.7)
     ax1.text(0.5,sig['tp'],f"TP {sig['tp']:.{dp}f}",color='#00ff88',fontsize=8,va='bottom')
     ax1.text(0.5,sig['sl'],f"SL {sig['sl']:.{dp}f}",color='#ff3366',fontsize=8,va='top')
-
-    # Bollinger Bands
     p_bb=20
     if len(c)>=p_bb:
         sma=[sum(c[max(0,i-p_bb):i+1])/min(i+1,p_bb) for i in range(len(c))]
@@ -917,7 +808,6 @@ def generate_chart(pair, tf, c, h, l, o, sig):
         ax1.plot(x,bb_up,color='#3a5a80',linewidth=0.8,linestyle=':',alpha=0.6)
         ax1.plot(x,bb_lo,color='#3a5a80',linewidth=0.8,linestyle=':',alpha=0.6)
         ax1.fill_between(x,bb_up,bb_lo,alpha=0.04,color='#0088ff')
-
     tf_lbl={"1":"1хв","3":"3хв","5":"5хв","15":"15хв","30":"30хв","60":"1год"}.get(str(tf),"5хв")
     ax1.set_title(f"⚡ SIGNAL AI  {pair} | {tf_lbl} | Точність {sig['acc']}%",
                   color='#00d4ff', fontsize=13, fontweight='bold', pad=10)
@@ -925,8 +815,6 @@ def generate_chart(pair, tf, c, h, l, o, sig):
     ax1.tick_params(colors='#6a8ab0'); ax1.yaxis.tick_right()
     for sp in ['top','right','bottom','left']: ax1.spines[sp].set_color('#1a2a40')
     ax1.set_xlim(-1, n+1)
-
-    # RSI панель
     ax2.set_facecolor('#0d1424')
     rsi_v=[]
     for i in range(len(c)):
@@ -946,67 +834,64 @@ def generate_chart(pair, tf, c, h, l, o, sig):
     ax2.set_ylim(0,100); ax2.set_ylabel('RSI',color='#6a8ab0',fontsize=9)
     ax2.tick_params(colors='#6a8ab0'); ax2.set_xlim(-1,n+1)
     for sp in ['top','right','bottom','left']: ax2.spines[sp].set_color('#1a2a40')
-
     plt.tight_layout(pad=0.5)
     buf=io.BytesIO()
     plt.savefig(buf,format='png',dpi=130,bbox_inches='tight',facecolor='#0d1424',edgecolor='none')
     buf.seek(0); plt.close()
     return buf
 
-# ══ ФОРМАТУВАННЯ ══════════════════════════════════════
 def bar(val,n=10):
     f=round(max(0,min(100,val))/100*n)
     return "▰"*f+"▱"*(n-f)
 
-def format_signal(pair,tf,d):
-    now_dt=datetime.now(timezone.utc)+timedelta(hours=2)
-    tf_hold={"1":2,"3":4,"5":8,"15":20,"30":35,"60":70,"240":260}
-    try:
-        exp=(now_dt+timedelta(minutes=tf_hold.get(int(tf),5))).strftime("%H:%M")
-    except:
-        exp=(now_dt+timedelta(minutes=5)).strftime("%H:%M")
-    tf_lbl=TIMEFRAMES.get(tf,CRYPTO_TF.get(tf,STOCKS_TF.get(tf,tf+"хв")))
-    is_buy=d["is_buy"]
-    arrow="⬆️" if is_buy else "⬇️"
-    dir_txt="ВВЕРХ" if is_buy else "ВНИЗ"
-    dir_em="🟢" if is_buy else "🔴"
-    acc=d["acc"]
-    acc_em="🔥" if acc>=86 else "✅" if acc>=78 else "⚠️"
-    src="🔴 Live" if d["real"] else "⚙️ Розрахунок"
+# ══ ФОРМАТУВАННЯ — З ЧАСОМ ВХОДУ ══════════════════════
+def format_signal(pair, tf, d):
+    now_dt = datetime.now(KYIV)
+    tf_lbl = TIMEFRAMES.get(tf, CRYPTO_TF.get(tf, STOCKS_TF.get(tf, tf+"хв")))
 
-    # Тренд
-    buy_r=d["buy_w"]/(max(0.1,d["buy_w"]+d["sell_w"]))
-    t_pct=round(buy_r*100) if is_buy else round((1-buy_r)*100)
-    t_str="Слабий" if t_pct<60 else "Середній" if t_pct<75 else "Сильний" if t_pct<88 else "Дуже сильний"
+    # ── РОЗРАХУНОК ЧАСУ ВХОДУ ──────────────────────────
+    entry_time, exit_time, closes_in_str = get_entry_time(tf)
+    # ────────────────────────────────────────────────────
 
-    # Топ підтверджуючі сигнали
-    target=1 if is_buy else -1
-    top_v=[x for x in d["votes"] if x["v"]==target]
-    top_v.sort(key=lambda x:-x["w"])
-    top3=top_v[:4]
-    top_lines="\n".join(f"✅ {x['l']}" for x in top3) if top3 else "⚪ Слабкий консенсус"
+    is_buy   = d["is_buy"]
+    arrow    = "⬆️" if is_buy else "⬇️"
+    dir_txt  = "ВВЕРХ" if is_buy else "ВНИЗ"
+    dir_em   = "🟢" if is_buy else "🔴"
+    acc      = d["acc"]
+    acc_em   = "🔥" if acc>=86 else "✅" if acc>=78 else "⚠️"
+    src      = "🔴 Live" if d["real"] else "⚙️ Розрахунок"
 
-    # Нові індикатори рядки
-    new_inds=[]
-    if d.get("ha_lbl"):    new_inds.append(f"🕯 {d['ha_lbl']}")
-    if d.get("psar_lbl"):  new_inds.append(f"📍 {d['psar_lbl']}")
-    if d.get("fib_lbl"):   new_inds.append(f"📐 {d['fib_lbl']}")
-    if d.get("sr_lbl"):    new_inds.append(f"📊 S/R: {d['sr_lbl']}")
-    if d.get("pat_lbl"):   new_inds.append(f"🕯 {d['pat_lbl']}")
-    new_ind_txt=("\n".join(new_inds)+"\n\n") if new_inds else ""
+    buy_r  = d["buy_w"] / (max(0.1, d["buy_w"]+d["sell_w"]))
+    t_pct  = round(buy_r*100) if is_buy else round((1-buy_r)*100)
+    t_str  = ("Слабий" if t_pct<60 else
+              "Середній" if t_pct<75 else
+              "Сильний" if t_pct<88 else "Дуже сильний")
 
-    # STC рядок
-    stc=d.get("stc")
-    stc_line=""
+    target    = 1 if is_buy else -1
+    top_v     = [x for x in d["votes"] if x["v"]==target]
+    top_v.sort(key=lambda x: -x["w"])
+    top3      = top_v[:4]
+    top_lines = "\n".join(f"✅ {x['l']}" for x in top3) if top3 else "⚪ Слабкий консенсус"
+
+    new_inds = []
+    if d.get("ha_lbl"):   new_inds.append(f"🕯 {d['ha_lbl']}")
+    if d.get("psar_lbl"): new_inds.append(f"📍 {d['psar_lbl']}")
+    if d.get("fib_lbl"):  new_inds.append(f"📐 {d['fib_lbl']}")
+    if d.get("sr_lbl"):   new_inds.append(f"📊 S/R: {d['sr_lbl']}")
+    if d.get("pat_lbl"):  new_inds.append(f"🕯 {d['pat_lbl']}")
+    new_ind_txt = ("\n".join(new_inds)+"\n\n") if new_inds else ""
+
+    stc = d.get("stc")
+    stc_line = ""
     if stc is not None:
-        si="🟢" if stc<25 else "🔴" if stc>75 else "🟡" if stc<50 else "🟠"
-        sz="Перепроданість" if stc<25 else "Перекупленість" if stc>75 else "Зростає" if stc<50 else "Падає"
-        stc_line=f"{si} STC: {stc} — {sz}\n"
+        si = "🟢" if stc<25 else "🔴" if stc>75 else "🟡" if stc<50 else "🟠"
+        sz = ("Перепроданість" if stc<25 else
+              "Перекупленість" if stc>75 else
+              "Зростає" if stc<50 else "Падає")
+        stc_line = f"{si} STC: {stc} — {sz}\n"
 
-    # ADX
-    adx_em="✅" if d["adx_ok"] else "⚠️"
+    adx_em = "✅" if d["adx_ok"] else "⚠️"
 
-    # Блокування — з причинами
     reasons = d.get("block_reasons", [])
     if d.get("blocked") and reasons:
         block_warn = "\n⛔ *НЕ ТОРГУВАТИ*\n" + "\n".join(f"• {r}" for r in reasons) + "\n"
@@ -1015,30 +900,32 @@ def format_signal(pair,tf,d):
     else:
         block_warn = ""
 
-    # Money Management
     mm = mm_text(acc)
-
-    # Фільтр новин
     has_news, news_warn = check_news_filter(pair)
     news_line = f"\n{news_warn}\n" if has_news else ""
 
-    lines=[
+    lines = [
         "╔══ ⚡ *SIGNAL AI v2.0* ══╗",
         "",
         f"🏷 *{pair}*  ⏱ {tf_lbl}  {src}",
         f"📍 {d['sess']}",
         "",
+        # ── ЧАС ВХОДУ ──────────────────────────────────
+        f"⏰ Свічка закриється через: *{closes_in_str}*",
+        f"🚀 *Час входу: {entry_time}*",
+        f"🏁 *Час виходу: {exit_time}*",
+        # ────────────────────────────────────────────────
+        "",
         f"📈 *Сила тренду* — {t_str} *{t_pct}%*",
         f"`{bar(t_pct)}`",
         "",
         f"{dir_em} *Напрямок: {arrow} {dir_txt}*",
-        f"Утримувати до: *{exp}*",
         "",
         f"{acc_em} Точність: *{acc}%*   {d['strength']}",
         f"ADX: *{d['adx']}* {adx_em}   Консенсус: *{d['consensus']}*",
         f"BUY {d['bc']} ({d['buy_w']})  |  SELL {d['sc']} ({d['sell_w']})",
         block_warn,
-        stc_line+new_ind_txt[:-1] if new_ind_txt else stc_line,
+        stc_line + new_ind_txt[:-1] if new_ind_txt else stc_line,
         "",
         "🔬 *Сигнали:*",
         top_lines,
@@ -1053,7 +940,6 @@ def format_signal(pair,tf,d):
     ]
     return "\n".join(lines)
 
-# ══ СЕСІЇ ТА СТАТИСТИКА ═══════════════════════════════
 def sessions_text():
     now=datetime.now(timezone.utc)
     h=now.hour
@@ -1093,7 +979,6 @@ def stats_text(cid):
             f"`{bar(wr)}`\n\n"
             f"{streak_txt}{top_pairs}")
 
-# ══ АВТОСКАНЕР ════════════════════════════════════════
 def run_scanner(cid,tf="5"):
     scan=FOREX_PAIRS[:8]+OTC_PAIRS[:5]
     results=[]
@@ -1104,7 +989,7 @@ def run_scanner(cid,tf="5"):
                 results.append((p["name"],tf,sig))
         except: pass
     if not results:
-        try: bot.send_message(cid,"🔍 Сканування завершено\n\nСильних сигналів не знайдено. Спробуйте пізніше або змініть таймфрейм.")
+        try: bot.send_message(cid,"🔍 Сканування завершено\n\nСильних сигналів не знайдено.")
         except: pass
         return
     results.sort(key=lambda x:-x[2]["acc"])
@@ -1116,7 +1001,6 @@ def run_scanner(cid,tf="5"):
             time.sleep(0.5)
     except: pass
 
-# ══ КЛАВІАТУРИ ════════════════════════════════════════
 def main_kb():
     kb=InlineKeyboardMarkup(row_width=2)
     kb.add(InlineKeyboardButton("📈 FOREX",callback_data="menu_forex"),
@@ -1153,9 +1037,7 @@ def result_kb(pair,tf):
            InlineKeyboardButton("🏠 Меню",callback_data="main"))
     return kb
 
-# ══ ХЕНДЛЕРИ ══════════════════════════════════════════
 def start_kb():
-    """Reply keyboard — постійна клавіатура знизу"""
     from telebot.types import ReplyKeyboardMarkup, KeyboardButton
     kb = ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
     kb.add(
@@ -1167,18 +1049,10 @@ def start_kb():
     )
     return kb
 
-# Маппінг тексту Reply кнопок → callback дії
 _REPLY_MAP = {
-    "📈 FOREX":           "menu_forex",
-    "🌙 OTC":              "menu_otc",
-    "₿ КРИПТО":           "menu_crypto",
-    "📊 АКЦІЇ":            "menu_stocks",
-    "🔍 СКАНЕР":           "scanner",
-    "📊 СТАТИСТИКА":       "stats",
-    "🕐 СЕСІЇ":            "sessions",
-    "🏠 МЕНЮ":             "main",
-    "🔔 АВТО-СИГНАЛИ":    "auto_signals",
-    "📓 ЖУРНАЛ":           "journal",
+    "📈 FOREX":"menu_forex","🌙 OTC":"menu_otc","₿ КРИПТО":"menu_crypto",
+    "📊 АКЦІЇ":"menu_stocks","🔍 СКАНЕР":"scanner","📊 СТАТИСТИКА":"stats",
+    "🕐 СЕСІЇ":"sessions","🏠 МЕНЮ":"main","🔔 АВТО-СИГНАЛИ":"auto_signals","📓 ЖУРНАЛ":"journal",
 }
 
 def send_main(cid,mid=None):
@@ -1190,9 +1064,9 @@ def send_main(cid,mid=None):
          "• 🆕 Heikin Ashi • 🆕 Parabolic SAR\n"
          "• 🆕 Fibonacci • 🆕 S/R рівні\n"
          "• 🆕 Торгові сесії\n\n"
-         "📡 TwelveData API\n"
-         "🎯 Точність: ~82-94%\n\n"
-         "💡 *Просто напиши назву пари:*\n"
+         "⏰ Точний час входу до кожного сигналу!\n\n"
+         "📡 TwelveData API  |  🎯 Точність: ~82-94%\n\n"
+         "💡 *Напиши назву пари:*\n"
          "`EURUSD` • `chfjpy` • `btc` • `AAPL`\n\n"
          "╚══ Або оберіть категорію ══╝")
     if mid:
@@ -1201,7 +1075,6 @@ def send_main(cid,mid=None):
     bot.send_message(cid,txt,parse_mode="Markdown",reply_markup=main_kb())
 
 def do_signal(cid,mid,pair,tf):
-    # Валідація pair і tf
     if pair not in ALL_PAIRS:
         try: bot.edit_message_text("❌ Невідома пара",cid,mid,reply_markup=main_kb())
         except: pass
@@ -1210,9 +1083,8 @@ def do_signal(cid,mid,pair,tf):
         try: bot.edit_message_text("❌ Невідомий таймфрейм",cid,mid,reply_markup=main_kb())
         except: pass
         return
-    # Rate limit
     if not check_rate_limit(cid):
-        try: bot.edit_message_text("⏳ Зачекайте кілька секунд перед наступним запитом",cid,mid,reply_markup=main_kb())
+        try: bot.edit_message_text("⏳ Зачекайте кілька секунд",cid,mid,reply_markup=main_kb())
         except: pass
         return
     tf_lbl=TIMEFRAMES.get(tf,CRYPTO_TF.get(tf,tf+"хв"))
@@ -1232,24 +1104,18 @@ def do_signal(cid,mid,pair,tf):
         sig = generate_signal(pair,tf)
     except Exception as e:
         print(f"[SIGNAL ERR] {pair} {tf}: {e}")
-        import traceback; traceback.print_exc()
-
     if sig is None:
-        try:
-            bot.delete_message(cid, mid)
+        try: bot.delete_message(cid, mid)
         except: pass
         try:
-            bot.send_message(
-                cid,
-                f"⚠️ *Помилка аналізу*\n\n`{pair}` | `{tf_lbl}`\n\n"
-                f"Не вдалося згенерувати сигнал. Спробуйте ще раз.",
+            bot.send_message(cid,
+                f"⚠️ *Помилка аналізу*\n\n`{pair}` | `{tf_lbl}`\n\nСпробуйте ще раз.",
                 parse_mode="Markdown",
                 reply_markup=InlineKeyboardMarkup().add(
                     InlineKeyboardButton("🔄 Спробувати",callback_data=f"tf|{pair}|{tf}"),
                     InlineKeyboardButton("🏠 Меню",callback_data="main")))
         except: pass
         return
-    # Генеруємо графік
     chart_buf = None
     try:
         m2 = ALL_PAIRS.get(pair, FOREX_PAIRS[0])
@@ -1259,25 +1125,16 @@ def do_signal(cid,mid,pair,tf):
             chart_buf = generate_chart(pair, tf, c2, h2, l2, o2, sig)
     except Exception as e:
         print(f"[CHART ERR] {e}")
-
     txt = format_signal(pair,tf,sig)
-    # Зберігаємо сигнал для алерту розвороту та журналу
-    _last_signals[str(cid)] = {
-        "pair": pair, "tf": tf,
-        "is_buy": sig["is_buy"],
-        "sent_at": time.time()
-    }
+    _last_signals[str(cid)] = {"pair": pair, "tf": tf, "is_buy": sig["is_buy"], "sent_at": time.time()}
     add_journal_entry(cid, pair, tf, sig["is_buy"], sig["acc"], sig["live"])
-    try:
-        bot.delete_message(cid, mid)
+    try: bot.delete_message(cid, mid)
     except: pass
     try:
         if chart_buf:
-            # Telegram caption ліміт — 1024 символи
             caption = txt if len(txt) <= 1024 else txt[:1020] + "..."
             bot.send_photo(cid, chart_buf, caption=caption,
                            parse_mode="Markdown", reply_markup=result_kb(pair,tf))
-            # Якщо текст обрізано — відправляємо повний окремо
             if len(txt) > 1024:
                 bot.send_message(cid, txt, parse_mode="Markdown")
         else:
@@ -1287,67 +1144,41 @@ def do_signal(cid,mid,pair,tf):
         try: bot.send_message(cid, txt, parse_mode="Markdown", reply_markup=result_kb(pair,tf))
         except: pass
 
-# ══ LOOKUP — нормалізація довільного тексту пари ══════
-# "chfjpy", "CHF/JPY", "chf/jpy otc", "EURUSD" → канонічна назва
 _PAIR_LOOKUP = {}
 for _p in FOREX_PAIRS + OTC_PAIRS + CRYPTO_PAIRS + STOCKS_PAIRS:
     _name = _p["name"]
-    _key1 = _name.replace("/","").replace(" ","").upper()
-    _key2 = _name.upper()
-    _PAIR_LOOKUP[_key1] = _name
-    _PAIR_LOOKUP[_key2] = _name
+    _PAIR_LOOKUP[_name.replace("/","").replace(" ","").upper()] = _name
+    _PAIR_LOOKUP[_name.upper()] = _name
     _PAIR_LOOKUP[_name] = _name
-# Тікери акцій
 _PAIR_LOOKUP.update({
     "AAPL":"Apple","TSLA":"Tesla","NVDA":"NVIDIA","AMZN":"Amazon",
-    "GOOGL":"Google","MSFT":"Microsoft","META":"Meta","NFLX":"Netflix"
-})
-# Псевдоніми крипто
-_PAIR_LOOKUP.update({
+    "GOOGL":"Google","MSFT":"Microsoft","META":"Meta","NFLX":"Netflix",
     "BITCOIN":"BTC/USD","ETHEREUM":"ETH/USD","SOLANA":"SOL/USD",
     "RIPPLE":"XRP/USD","CARDANO":"ADA/USD","DOGECOIN":"DOGE/USD",
     "LITECOIN":"LTC/USD","BINANCE":"BNB/USD","BNB":"BNB/USD",
 })
 
 def normalize_pair(text):
-    """Перетворює довільний текст в канонічну назву пари.
-    Підтримує: EURUSD, EUR/USD, eurusd, chfjpy, btc, bitcoin, AAPL, apple,
-               EURUSD OTC, eurusdotc, EUR/USD OTC
-    """
     t = text.strip().upper().replace("-","").replace("_","")
-
-    # Спроба 1: як є
     if t in _PAIR_LOOKUP: return _PAIR_LOOKUP[t]
-
-    # Спроба 2: без слешу і пробілів
     t2 = t.replace("/","").replace(" ","")
     if t2 in _PAIR_LOOKUP: return _PAIR_LOOKUP[t2]
-
-    # Спроба 3: OTC формат "EURUSD OTC" → "EURUSDOTC"
     if "OTC" in t:
         t_otc = t.replace(" ","").replace("/","")
         if t_otc in _PAIR_LOOKUP: return _PAIR_LOOKUP[t_otc]
-
-    # Спроба 4: додаємо /USD для крипто (btc → BTC/USD)
     t_usd = t2 + "USD"
     if t_usd in _PAIR_LOOKUP: return _PAIR_LOOKUP[t_usd]
-
-    # Спроба 5: часткове співпадіння — перші 6 символів
     for key, val in _PAIR_LOOKUP.items():
         if len(t2) >= 3 and key.startswith(t2) and len(key) <= len(t2)+3:
             return val
-
     return None
 
 @bot.message_handler(commands=["start","menu"])
 def cmd_start(msg):
     send_main(msg.chat.id)
-    bot.send_message(
-        msg.chat.id,
+    bot.send_message(msg.chat.id,
         "⌨️ Клавіатура активована!\n_Або просто напиши назву пари: `eurusd`, `chfjpy`, `btc`_",
-        parse_mode="Markdown",
-        reply_markup=start_kb()
-    )
+        parse_mode="Markdown", reply_markup=start_kb())
 
 @bot.message_handler(commands=["stats"])
 def cmd_stats(msg): bot.send_message(msg.chat.id,stats_text(msg.chat.id),parse_mode="Markdown",reply_markup=main_kb())
@@ -1361,25 +1192,18 @@ def cmd_scan(msg):
 def cmd_subscribe(msg):
     cid = msg.chat.id
     if cid in _subscribers:
-        _subscribers.discard(cid)
-        _save_subscribers()
-        bot.send_message(cid, "🔕 *Авто-сигнали вимкнено*\n\nНадсилай /auto щоб увімкнути знову.", parse_mode="Markdown")
+        _subscribers.discard(cid); _save_subscribers()
+        bot.send_message(cid, "🔕 *Авто-сигнали вимкнено*", parse_mode="Markdown")
     else:
-        _subscribers.add(cid)
-        _save_subscribers()
-        bot.send_message(cid,
-            "🔔 *Авто-сигнали увімкнено!*\n\n"
-            "⚡ Найсильніші сигнали (≥85%) будуть надходити автоматично кожні 5 хвилин.\n\n"
-            "📌 Щоб вимкнути — надішли /auto знову.",
-            parse_mode="Markdown")
+        _subscribers.add(cid); _save_subscribers()
+        bot.send_message(cid, "🔔 *Авто-сигнали увімкнено!*\n\n⚡ Найсильніші сигнали (≥85%) кожні 5 хвилин.", parse_mode="Markdown")
 
 @bot.message_handler(commands=["journal"])
 def cmd_journal(msg):
     cid = msg.chat.id
     entries = get_journal(cid, 10)
     if not entries:
-        bot.send_message(cid, "📓 *Журнал угод порожній*\n\nПочни торгувати і результати збережуться тут!", parse_mode="Markdown")
-        return
+        bot.send_message(cid, "📓 *Журнал угод порожній*", parse_mode="Markdown"); return
     lines = ["📓 *Журнал угод (останні 10)*\n"]
     wins = sum(1 for e in entries if e.get("result") == "win")
     losses = sum(1 for e in entries if e.get("result") == "loss")
@@ -1408,125 +1232,75 @@ def cmd_mtf(msg):
 
 @bot.message_handler(func=lambda m: True)
 def cmd_text(msg):
-    """Обробляє довільний текст — Reply кнопки або назва пари"""
     cid = msg.chat.id
     text = (msg.text or "").strip()
     if not text: return
-
-    # ── Перевірка Reply кнопок ──
     upper = text.upper()
     if upper in _REPLY_MAP:
         action = _REPLY_MAP[upper]
-        if action == "main":
-            send_main(cid)
-        elif action == "menu_forex":
-            bot.send_message(cid,"📈 *FOREX пари*\nОберіть пару:",parse_mode="Markdown",reply_markup=pairs_kb(FOREX_PAIRS,"main"))
-        elif action == "menu_otc":
-            bot.send_message(cid,"🌙 *OTC пари*\nОберіть пару:",parse_mode="Markdown",reply_markup=pairs_kb(OTC_PAIRS,"main"))
-        elif action == "menu_crypto":
-            bot.send_message(cid,"₿ *КРИПТО*\nОберіть пару:",parse_mode="Markdown",reply_markup=pairs_kb(CRYPTO_PAIRS,"main"))
-        elif action == "menu_stocks":
-            bot.send_message(cid,"📊 *АКЦІЇ*\nОберіть:",parse_mode="Markdown",reply_markup=pairs_kb(STOCKS_PAIRS,"main"))
-        elif action == "scanner":
-            bot.send_message(cid,"🔍 *Запускаю сканер...*",parse_mode="Markdown")
-            threading.Thread(target=run_scanner,args=(cid,),daemon=True).start()
-        elif action == "stats":
-            bot.send_message(cid,stats_text(cid),parse_mode="Markdown",reply_markup=main_kb())
-        elif action == "sessions":
-            bot.send_message(cid,sessions_text(),parse_mode="Markdown",reply_markup=main_kb())
+        if action == "main":          send_main(cid)
+        elif action == "menu_forex":  bot.send_message(cid,"📈 *FOREX пари*\nОберіть пару:",parse_mode="Markdown",reply_markup=pairs_kb(FOREX_PAIRS,"main"))
+        elif action == "menu_otc":    bot.send_message(cid,"🌙 *OTC пари*\nОберіть пару:",parse_mode="Markdown",reply_markup=pairs_kb(OTC_PAIRS,"main"))
+        elif action == "menu_crypto": bot.send_message(cid,"₿ *КРИПТО*\nОберіть пару:",parse_mode="Markdown",reply_markup=pairs_kb(CRYPTO_PAIRS,"main"))
+        elif action == "menu_stocks": bot.send_message(cid,"📊 *АКЦІЇ*\nОберіть:",parse_mode="Markdown",reply_markup=pairs_kb(STOCKS_PAIRS,"main"))
+        elif action == "scanner":     bot.send_message(cid,"🔍 *Запускаю сканер...*",parse_mode="Markdown"); threading.Thread(target=run_scanner,args=(cid,),daemon=True).start()
+        elif action == "stats":       bot.send_message(cid,stats_text(cid),parse_mode="Markdown",reply_markup=main_kb())
+        elif action == "sessions":    bot.send_message(cid,sessions_text(),parse_mode="Markdown",reply_markup=main_kb())
         elif action == "auto_signals":
-            if cid in _subscribers:
-                _subscribers.discard(cid)
-                _save_subscribers()
-                bot.send_message(cid, "🔕 *Авто-сигнали вимкнено*", parse_mode="Markdown")
-            else:
-                _subscribers.add(cid)
-                _save_subscribers()
-                bot.send_message(cid, "🔔 *Авто-сигнали увімкнено!*\nСигнали ≥85% кожні 5 хвилин.", parse_mode="Markdown")
-        elif action == "journal":
-            cmd_journal(msg)
+            if cid in _subscribers: _subscribers.discard(cid); _save_subscribers(); bot.send_message(cid,"🔕 *Авто-сигнали вимкнено*",parse_mode="Markdown")
+            else: _subscribers.add(cid); _save_subscribers(); bot.send_message(cid,"🔔 *Авто-сигнали увімкнено!*",parse_mode="Markdown")
+        elif action == "journal": cmd_journal(msg)
         return
-
     pair = normalize_pair(text)
-
     if pair:
         is_crypto = any(pair == p["name"] for p in CRYPTO_PAIRS)
         is_stocks = any(pair == p["name"] for p in STOCKS_PAIRS)
         is_otc    = "OTC" in pair
         tfs = CRYPTO_TF if is_crypto else (STOCKS_TF if is_stocks else TIMEFRAMES)
         kb = InlineKeyboardMarkup(row_width=3)
-        kb.add(*[InlineKeyboardButton(v, callback_data=f"tf|{pair}|{k}")
-                 for k,v in tfs.items()])
+        kb.add(*[InlineKeyboardButton(v, callback_data=f"tf|{pair}|{k}") for k,v in tfs.items()])
         kb.add(InlineKeyboardButton("◀️ Меню", callback_data="main"))
         cat = "₿ Крипто" if is_crypto else ("📊 Акції" if is_stocks else ("🌙 OTC" if is_otc else "📈 Forex"))
-        bot.send_message(
-            cid,
-            f"✅ *{pair}* знайдено  {cat}\n\n⏱ Оберіть таймфрейм:",
-            parse_mode="Markdown", reply_markup=kb
-        )
+        bot.send_message(cid, f"✅ *{pair}* знайдено  {cat}\n\n⏱ Оберіть таймфрейм:", parse_mode="Markdown", reply_markup=kb)
     else:
-        bot.send_message(
-            cid,
+        bot.send_message(cid,
             "❓ *Пару не знайдено*\n\n"
-            "Спробуй інший формат:\n"
-            "`EURUSD` або `EUR/USD`\n"
-            "`chfjpy` або `CHF/JPY`\n"
-            "`btc` або `bitcoin`\n"
-            "`AAPL` або `apple`\n\n"
-            "Або оберіть з меню 👇",
-            parse_mode="Markdown", reply_markup=main_kb()
-        )
+            "Спробуй: `EURUSD`, `chfjpy`, `btc`, `AAPL`\n\nАбо оберіть з меню 👇",
+            parse_mode="Markdown", reply_markup=main_kb())
+
 @bot.callback_query_handler(func=lambda c: True)
 def handle_cb(call):
     cid=call.message.chat.id; mid=call.message.message_id; d=call.data
     bot.answer_callback_query(call.id)
     try:
         if d=="main": send_main(cid,mid)
-        elif d in("menu_forex","forex_back"):
-            bot.edit_message_text("📈 *FOREX пари*\nОберіть пару:",cid,mid,parse_mode="Markdown",reply_markup=pairs_kb(FOREX_PAIRS,"main"))
-        elif d in("menu_otc","otc_back"):
-            bot.edit_message_text("🌙 *OTC пари*\nОберіть пару:",cid,mid,parse_mode="Markdown",reply_markup=pairs_kb(OTC_PAIRS,"main"))
-        elif d in("menu_crypto","crypto_back"):
-            bot.edit_message_text("₿ *КРИПТО*\nОберіть пару:",cid,mid,parse_mode="Markdown",reply_markup=pairs_kb(CRYPTO_PAIRS,"main"))
-        elif d in("menu_stocks","stocks_back"):
-            bot.edit_message_text("📊 *АКЦІЇ*\nОберіть:",cid,mid,parse_mode="Markdown",reply_markup=pairs_kb(STOCKS_PAIRS,"main"))
-        elif d=="stats":
-            bot.edit_message_text(stats_text(cid),cid,mid,parse_mode="Markdown",reply_markup=main_kb())
-        elif d=="sessions":
-            bot.edit_message_text(sessions_text(),cid,mid,parse_mode="Markdown",reply_markup=main_kb())
+        elif d in("menu_forex","forex_back"): bot.edit_message_text("📈 *FOREX пари*\nОберіть пару:",cid,mid,parse_mode="Markdown",reply_markup=pairs_kb(FOREX_PAIRS,"main"))
+        elif d in("menu_otc","otc_back"):     bot.edit_message_text("🌙 *OTC пари*\nОберіть пару:",cid,mid,parse_mode="Markdown",reply_markup=pairs_kb(OTC_PAIRS,"main"))
+        elif d in("menu_crypto","crypto_back"): bot.edit_message_text("₿ *КРИПТО*\nОберіть пару:",cid,mid,parse_mode="Markdown",reply_markup=pairs_kb(CRYPTO_PAIRS,"main"))
+        elif d in("menu_stocks","stocks_back"): bot.edit_message_text("📊 *АКЦІЇ*\nОберіть:",cid,mid,parse_mode="Markdown",reply_markup=pairs_kb(STOCKS_PAIRS,"main"))
+        elif d=="stats":    bot.edit_message_text(stats_text(cid),cid,mid,parse_mode="Markdown",reply_markup=main_kb())
+        elif d=="sessions": bot.edit_message_text(sessions_text(),cid,mid,parse_mode="Markdown",reply_markup=main_kb())
         elif d=="scanner":
             bot.edit_message_text("🔍 *Авто-сканер*\nШукаю найсильніші сигнали...",cid,mid,parse_mode="Markdown")
             threading.Thread(target=run_scanner,args=(cid,),daemon=True).start()
         elif d=="about":
             bot.edit_message_text(
-                "ℹ️ *SIGNAL AI v2.0 — Оновлений бот*\n\n"
-                "*14 індикаторів:*\n"
-                "• RSI, MACD, EMA 9/21/50\n"
-                "• Stochastic, BB, Williams %R\n"
-                "• STC, Momentum, ADX\n"
-                "• 🆕 Heikin Ashi\n"
-                "• 🆕 Parabolic SAR\n"
-                "• 🆕 Fibonacci рівні\n"
-                "• 🆕 Підтримка/Опір\n"
-                "• 🆕 Свічкові патерни v2\n\n"
-                "*Фільтри:*\n"
-                "• ADX < 20 → ⛔ блокування\n"
-                "• Торгова сесія → множник точності\n"
-                "• Консенсус 9 топ-індикаторів\n\n"
-                "📡 TwelveData API\n"
-                "🎯 Точність: ~82-94%",
+                "ℹ️ *SIGNAL AI v2.0*\n\n*14 індикаторів:*\n"
+                "• RSI, MACD, EMA 9/21/50\n• Stochastic, BB, Williams %R\n"
+                "• STC, Momentum, ADX\n• 🆕 Heikin Ashi\n• 🆕 Parabolic SAR\n"
+                "• 🆕 Fibonacci рівні\n• 🆕 Підтримка/Опір\n• 🆕 Свічкові патерни\n\n"
+                "⏰ *Час входу* до кожного сигналу!\n\n📡 TwelveData API\n🎯 Точність: ~82-94%",
                 cid,mid,parse_mode="Markdown",reply_markup=main_kb())
         elif d.startswith("pair_"):
             pair=d[5:]
-            if pair not in ALL_PAIRS:
-                bot.answer_callback_query(call.id, "❌ Невідома пара"); return
+            if pair not in ALL_PAIRS: bot.answer_callback_query(call.id,"❌ Невідома пара"); return
             bot.edit_message_text(f"⏱ *Таймфрейм для {pair}*\nОберіть:",cid,mid,parse_mode="Markdown",reply_markup=tf_kb(pair))
         elif d.startswith("tf|"):
             parts = d.split("|", 2)
             if len(parts) == 3:
                 _,pair,tf = parts
                 if pair not in ALL_PAIRS or tf not in {**TIMEFRAMES,**CRYPTO_TF,**STOCKS_TF}:
-                    bot.answer_callback_query(call.id, "❌ Некоректні дані"); return
+                    bot.answer_callback_query(call.id,"❌ Некоректні дані"); return
                 threading.Thread(target=do_signal,args=(cid,mid,pair,tf),daemon=True).start()
         elif d.startswith(("win|","loss|")):
             parts = d.split("|", 2)
@@ -1541,7 +1315,6 @@ def handle_cb(call):
             s["pairs"][pair]["total"]+=1
             if res=="win": s["pairs"][pair]["wins"]+=1
             save_user_stats()
-            # Оновлюємо журнал
             j = get_journal(cid, 1)
             if j and j[-1].get("pair") == pair and j[-1].get("result") is None:
                 j[-1]["result"] = "win" if res=="win" else "loss"
@@ -1557,62 +1330,34 @@ def handle_cb(call):
 
 if __name__=="__main__":
     import logging
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(message)s"
-    )
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
     logger = logging.getLogger(__name__)
-
     print("✅ SIGNAL AI Bot v2.0 запущено!")
-    logger.info("Bot starting...")
-
-    # Фонові потоки
     threading.Thread(target=auto_signal_loop, daemon=True).start()
     threading.Thread(target=reversal_monitor, daemon=True).start()
-    logger.info("Фонові потоки запущено: авто-сигнали + моніторинг розворотів")
-
-    # ── Повне очищення старих сесій ──
-    # Закриваємо всі з'єднання і видаляємо webhook
     for attempt in range(8):
-        try:
-            bot.close()  # закриває активні сесії
+        try: bot.close()
         except: pass
         try:
             bot.delete_webhook(drop_pending_updates=True)
-            logger.info("Webhook видалено")
-            break
+            logger.info("Webhook видалено"); break
         except Exception as e:
             logger.warning(f"delete_webhook спроба {attempt+1}: {e}")
             time.sleep(3 + attempt * 2)
-
-    # Довга пауза — чекаємо поки старий процес точно завершиться
-    logger.info("Чекаємо 15 сек перед стартом polling...")
+    logger.info("Чекаємо 15 сек...")
     time.sleep(15)
-
-    # Запуск з автоперезапуском
     while True:
         try:
             logger.info("Starting polling...")
-            bot.infinity_polling(
-                timeout=25,
-                long_polling_timeout=20,
-                skip_pending=True,
-                none_stop=True,
-                restart_on_change=False,
-                allowed_updates=["message","callback_query"]
-            )
+            bot.infinity_polling(timeout=25, long_polling_timeout=20,
+                skip_pending=True, none_stop=True, restart_on_change=False,
+                allowed_updates=["message","callback_query"])
         except Exception as e:
             err = str(e)
             logger.error(f"Polling crashed: {err}")
-            if "409" in err:
-                logger.warning("409 Conflict — чекаємо 30 сек...")
-                time.sleep(30)
-            else:
-                time.sleep(10)
-            try:
-                bot.close()
+            if "409" in err: time.sleep(30)
+            else: time.sleep(10)
+            try: bot.close()
             except: pass
-            try:
-                bot.delete_webhook(drop_pending_updates=True)
-                time.sleep(5)
+            try: bot.delete_webhook(drop_pending_updates=True); time.sleep(5)
             except: pass
