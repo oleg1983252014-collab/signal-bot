@@ -8,50 +8,34 @@ from datetime import datetime, timezone, timedelta
 from telebot import TeleBot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-BOT_TOKEN  = os.environ.get("BOT_TOKEN", "8542231431:AAHJ-9Rwr_taqFMaBd9YBau8bVcMU38633Y")
-TWELVE_KEY = os.environ.get("TWELVE_KEY", "99b3ca01dbdf45ccb2f5968b16af1c82")
+BOT_TOKEN  = "8542231431:AAHJ-9Rwr_taqFMaBd9YBau8bVcMU38633Y"
+TWELVE_KEY = os.environ.get("TWELVE_KEY")
+if not TWELVE_KEY:
+    TWELVE_KEY = "99b3ca01dbdf45ccb2f5968b16af1c82"
 
-KYIV = timezone(timedelta(hours=2))
+KYIV = timezone(timedelta(hours=2))  # ← ДОДАНО
 
-# ══ РОЗРАХУНОК ЧАСУ ВІДКРИТТЯ ТА ВХОДУ В УГОДУ ═══════
+# ══ РОЗРАХУНОК ЧАСУ ВХОДУ ══════════════════════════════
 def get_entry_time(tf: str):
     """
-    Повертає (час_відкриття_угоди, час_входу, час_виходу, рядок_до_закриття)
-    Час відкриття = зараз (поточний момент)
-    Час входу     = початок НАСТУПНОЇ свічки
-    Час виходу    = кінець наступної свічки
+    Повертає (час_входу, час_виходу, рядок_до_закриття)
+    Час входу = початок НАСТУПНОЇ свічки
     """
     try:
         mins = int(tf)
     except:
         mins = 5
-
     now = datetime.now(KYIV)
-    open_time = now.strftime("%H:%M:%S")  # точний час відкриття угоди
-
-    # Для таймфреймів >= 60хв рахуємо по годинах
-    if mins >= 60:
-        hours = mins // 60
-        current_hour_block = (now.hour // hours) * hours
-        next_hour_block    = current_hour_block + hours
-        entry_dt = now.replace(second=0, microsecond=0, minute=0, hour=0) + timedelta(hours=next_hour_block)
-        exit_dt  = entry_dt + timedelta(hours=hours)
-        total_secs  = hours * 3600
-        passed_secs = (now.hour % hours) * 3600 + now.minute * 60 + now.second
-    else:
-        current_start = (now.minute // mins) * mins
-        next_min      = current_start + mins
-        entry_dt      = now.replace(second=0, microsecond=0, minute=0) + timedelta(minutes=next_min)
-        exit_dt       = entry_dt + timedelta(minutes=mins)
-        total_secs    = mins * 60
-        passed_secs   = (now.minute % mins) * 60 + now.second
-
-    closes_in  = max(0, total_secs - passed_secs)
-    closes_min = closes_in // 60
-    closes_sec = closes_in % 60
-
+    current_start  = (now.minute // mins) * mins
+    next_min       = current_start + mins
+    entry_dt       = now.replace(second=0, microsecond=0, minute=0) + timedelta(minutes=next_min)
+    exit_dt        = entry_dt + timedelta(minutes=mins)
+    seconds_in     = mins * 60
+    seconds_past   = (now.minute % mins) * 60 + now.second
+    closes_in      = seconds_in - seconds_past
+    closes_min     = closes_in // 60
+    closes_sec     = closes_in % 60
     return (
-        open_time,
         entry_dt.strftime("%H:%M"),
         exit_dt.strftime("%H:%M"),
         f"{closes_min}хв {closes_sec:02d}с"
@@ -316,6 +300,9 @@ def auto_signal_loop():
 TWELVE_URL = "https://api.twelvedata.com"
 STATS_FILE = "stats.json"
 
+if not BOT_TOKEN:
+    raise ValueError("❌ BOT_TOKEN не встановлено!")
+
 bot = TeleBot(BOT_TOKEN)
 
 FOREX_PAIRS=[
@@ -409,6 +396,7 @@ def ema(a,p):
     for x in a[p:]: v=x*k+v*(1-k)
     return v
 
+# ══ RSI з дивергенцією ═══════════════════════════════
 def calc_rsi(c,p=14):
     if len(c)<p+1: return 50
     g=[max(c[i]-c[i-1],0) for i in range(1,len(c))]
@@ -416,6 +404,21 @@ def calc_rsi(c,p=14):
     ag=sum(g[-p:])/p; al=sum(l[-p:])/p
     return round(100-100/(1+ag/al),1) if al else 100
 
+def calc_rsi_divergence(c,h,l,p=14):
+    """Бичяча дивергенція: ціна нижче, RSI вище → сигнал BUY
+       Ведмежа дивергенція: ціна вище, RSI нижче → сигнал SELL"""
+    if len(c)<p*2+5: return 0,""
+    mid=len(c)//2
+    rsi_now=calc_rsi(c,p)
+    rsi_mid=calc_rsi(c[:mid],p)
+    price_now=c[-1]; price_mid=c[mid]
+    if price_now<price_mid*0.999 and rsi_now>rsi_mid+3:
+        return 1,"🔥 RSI бичяча дивергенція"
+    if price_now>price_mid*1.001 and rsi_now<rsi_mid-3:
+        return -1,"🔥 RSI ведмежа дивергенція"
+    return 0,""
+
+# ══ MACD ════════════════════════════════════════════
 def calc_macd(c):
     if len(c)<26: return 0,0
     ml=ema(c,12)-ema(c,26)
@@ -423,30 +426,31 @@ def calc_macd(c):
     sig=ema(mv,9) if len(mv)>=9 else ml
     return ml, ml-sig
 
+# ══ STOCHASTIC ══════════════════════════════════════
 def calc_stoch(c,h,l,k=14):
     if len(c)<k: return 50,50
     hh=max(h[-k:]); ll=min(l[-k:])
     kv=round((c[-1]-ll)/(hh-ll)*100,1) if hh!=ll else 50
     return kv, kv
 
+# ══ BOLLINGER BANDS ═════════════════════════════════
 def calc_bb(c,p=20):
     if len(c)<p: return 50
     s=sum(c[-p:])/p; std=(sum((x-s)**2 for x in c[-p:])/p)**0.5
     up=s+2*std; lo=s-2*std
     return round(max(0,min(100,(c[-1]-lo)/max(1e-9,up-lo)*100)),1)
 
-def calc_willr(c,h,l,p=14):
-    if len(c)<p: return -50
-    hh=max(h[-p:]); ll=min(l[-p:])
-    return round((hh-c[-1])/max(1e-9,hh-ll)*-100,1)
+def calc_bb_squeeze(c,p=20):
+    """Звуження BB — ринок готується до сильного руху"""
+    if len(c)<p*2: return False
+    def bw(arr):
+        s=sum(arr[-p:])/p
+        std=(sum((x-s)**2 for x in arr[-p:])/p)**0.5
+        return (s+2*std)-(s-2*std)
+    bw_now=bw(c); bw_old=bw(c[:-5])
+    return bw_now < bw_old*0.7  # звуження >30% — squeeze
 
-def calc_stc(c,cy=10,fa=23,sl=50):
-    if len(c)<sl+cy: return None
-    ml=[ema(c[:i],fa)-ema(c[:i],sl) for i in range(sl,len(c)+1)]
-    if len(ml)<cy: return None
-    hh=max(ml[-cy:]); ll=min(ml[-cy:])
-    return round((ml[-1]-ll)/max(1e-9,hh-ll)*100,1)
-
+# ══ ADX (сила тренду) ════════════════════════════════
 def calc_adx(c,h,l,p=14):
     if len(c)<p+2: return 0
     trs,pm,nm=[],[],[]
@@ -460,15 +464,22 @@ def calc_adx(c,h,l,p=14):
     pdi=sum(pm[-p:])/p/atr*100; ndi=sum(nm[-p:])/p/atr*100
     return round(abs(pdi-ndi)/max(1e-9,pdi+ndi)*100)
 
+# ══ ATR (волатильність) ══════════════════════════════
 def calc_atr(c,h,l,p=14):
     if len(c)<2: return 0
     tr=[max(h[i]-l[i],abs(h[i]-c[i-1]),abs(l[i]-c[i-1])) for i in range(1,len(c))]
     return sum(tr[-p:])/min(p,len(tr)) if tr else 0
 
-def calc_momentum(c,p=10):
-    if len(c)<p+1: return 0
-    return round((c[-1]-c[-p-1])/c[-p-1]*100,3) if c[-p-1] else 0
+def atr_filter(c,h,l,p=14):
+    """Повертає True якщо ринок НЕ flat (є волатильність для торгівлі)"""
+    atr=calc_atr(c,h,l,p)
+    if not c[-1]: return True,atr
+    atr_pct=atr/c[-1]*100
+    # flat якщо ATR менше 0.03% для forex або 0.1% для крипто
+    ok = atr_pct > 0.02
+    return ok, atr
 
+# ══ HEIKIN ASHI ══════════════════════════════════════
 def calc_heikin_ashi(o,c,h,l):
     if len(c)<3: return 0,""
     ha_c=[(o[i]+h[i]+l[i]+c[i])/4 for i in range(len(c))]
@@ -489,6 +500,7 @@ def calc_heikin_ashi(o,c,h,l):
     if ha_c[-1]<ha_o[-1]: return -1,"HA: ведмежа свічка"
     return 0,"HA: нейтраль"
 
+# ══ PARABOLIC SAR ════════════════════════════════════
 def calc_parabolic_sar(h,l,af0=0.02,afm=0.2):
     if len(h)<5: return 0,""
     bull=l[0]<l[1]; sar=l[0] if bull else h[0]; ep=h[0] if bull else l[0]; af=af0
@@ -509,20 +521,7 @@ def calc_parabolic_sar(h,l,af0=0.02,afm=0.2):
     if fresh and not bull: return -1,"🔥 PSAR: свіжий розворот ▼"
     return (1,"PSAR: бичячий ▲") if bull else (-1,"PSAR: ведмежий ▼")
 
-def calc_fibonacci(h,l,c,lb=30):
-    if len(h)<lb: lb=len(h)
-    rh=max(h[-lb:]); rl=min(l[-lb:]); diff=rh-rl
-    if diff<1e-9: return 0,"",[]
-    fibs={0.236:rh-diff*0.236,0.382:rh-diff*0.382,
-          0.500:rh-diff*0.500,0.618:rh-diff*0.618,0.786:rh-diff*0.786}
-    price=c[-1]; atr=calc_atr(c,h,l); zone=max(atr*0.8,diff*0.02)
-    for lvl,fp in sorted(fibs.items()):
-        if abs(price-fp)<zone:
-            up=c[-1]>c[-3] if len(c)>=3 else False
-            if up: return 1,f"Fib {lvl:.3f} підтримка ▲",list(fibs.values())
-            else:  return -1,f"Fib {lvl:.3f} опір ▼",list(fibs.values())
-    return 0,"",list(fibs.values())
-
+# ══ ПІДТРИМКА / ОПІР ═════════════════════════════════
 def calc_support_resistance(c,h,l,n=3):
     if len(c)<10: return [],[]
     sup=[]; res=[]
@@ -541,15 +540,16 @@ def sr_signal(price,sup,res,atr):
     if not atr: return 0,""
     z=atr*0.5
     for s in sup:
-        if abs(price-s)<z: return 1,f"Відскок від підтримки"
+        if abs(price-s)<z: return 1,"Відскок від підтримки"
     for r in res:
-        if abs(price-r)<z: return -1,f"Відскок від опору"
+        if abs(price-r)<z: return -1,"Відскок від опору"
     for r in res:
         if price>r and price-r<z*2: return 1,"Пробій опору ▲"
     for s in sup:
         if price<s and s-price<z*2: return -1,"Пробій підтримки ▼"
     return 0,""
 
+# ══ ТОРГОВА СЕСІЯ ════════════════════════════════════
 def get_session():
     h=datetime.now(timezone.utc).hour
     if 7<=h<9:    return "Лондон відкриття 🟢","excellent",1.15
@@ -559,6 +559,16 @@ def get_session():
     elif 18<=h<21: return "Між сесіями 🔴","poor",0.80
     elif 21<=h<23: return "Токіо 🟡","average",0.90
     else:          return "Нічна сесія 🔴","poor",0.75
+
+def session_open_filter():
+    """Перші 5хв після відкриття сесії — хаотичні, краще не торгувати"""
+    now=datetime.now(timezone.utc)
+    h,m=now.hour,now.minute
+    opens=[7,9,12,21]  # години відкриття сесій
+    for op in opens:
+        if h==op and m<5:
+            return True, f"⚠️ Відкриття сесії {op}:00 UTC — зачекайте 5хв"
+    return False, ""
 
 _candle_cache = {}
 TF_CACHE_SEC = {"1":30,"3":90,"5":150,"15":300,"30":600,"60":1200,"240":2400}
@@ -609,22 +619,25 @@ def generate_signal(pair_name,tf):
             hi=max(op,cl)*(1+sr(i+30)*0.001); lo=min(op,cl)*(1-sr(i+40)*0.001)
             ov.append(op); cv.append(cl); hv.append(hi); lv.append(lo)
         c,h,l,o=cv,hv,lv,ov
-    rsi      = calc_rsi(c)
-    macd,mh  = calc_macd(c)
+
+    # ══ РОЗРАХУНОК ІНДИКАТОРІВ ═══════════════════════
+    rsi           = calc_rsi(c)
+    div_val, div_lbl = calc_rsi_divergence(c,h,l)
+    macd,mh       = calc_macd(c)
     e9=ema(c,9); e21=ema(c,21); e50=ema(c,50)
-    k_val,_  = calc_stoch(c,h,l)
-    bb       = calc_bb(c)
-    willr    = calc_willr(c,h,l)
-    stc      = calc_stc(c)
-    adx      = calc_adx(c,h,l)
-    atr      = calc_atr(c,h,l)
-    mom      = calc_momentum(c)
-    ha_val, ha_lbl         = calc_heikin_ashi(o,c,h,l)
-    psar_val, psar_lbl     = calc_parabolic_sar(h,l)
-    fib_val, fib_lbl, _    = calc_fibonacci(h,l,c)
-    sup, res               = calc_support_resistance(c,h,l)
-    sr_val, sr_lbl         = sr_signal(live,sup,res,atr)
-    sess_name, sess_q, sess_mult = get_session()
+    k_val,_       = calc_stoch(c,h,l)
+    bb            = calc_bb(c)
+    bb_sq         = calc_bb_squeeze(c)
+    adx           = calc_adx(c,h,l)
+    atr_ok, atr   = atr_filter(c,h,l)
+    ha_val,ha_lbl = calc_heikin_ashi(o,c,h,l)
+    psar_val,psar_lbl = calc_parabolic_sar(h,l)
+    sup,res       = calc_support_resistance(c,h,l)
+    sr_val,sr_lbl = sr_signal(live,sup,res,atr)
+    sess_name,sess_q,sess_mult = get_session()
+    sess_open_blocked, sess_open_msg = session_open_filter()
+
+    # ══ СВІЧКОВІ ПАТЕРНИ ═════════════════════════════
     def candle_pat():
         if len(c)<3: return 0,""
         b2=abs(c[-2]-o[-2]); r2=max(1e-9,h[-2]-l[-2])
@@ -634,75 +647,98 @@ def generate_signal(pair_name,tf):
         engbb=(c[-2]>o[-2] and c[-1]<o[-1] and c[-1]<o[-2] and o[-1]>c[-2])
         t3b=all(c[-(i+1)]>o[-(i+1)] and c[-(i+1)]>c[-(i+2)] for i in range(3)) if len(c)>=4 else False
         t3bb=all(c[-(i+1)]<o[-(i+1)] and c[-(i+1)]<c[-(i+2)] for i in range(3)) if len(c)>=4 else False
-        if engb: return 1,"🕯 Бичяче поглинання"
+        if engb:  return 1,"🕯 Бичяче поглинання"
         if engbb: return -1,"🕯 Ведмеже поглинання"
-        if t3b: return 1,"🕯 3 бичячі свічки"
-        if t3bb: return -1,"🕯 3 ведмежі свічки"
+        if t3b:   return 1,"🕯 3 бичячі свічки"
+        if t3bb:  return -1,"🕯 3 ведмежі свічки"
         if doji and c[-1]>o[-1]: return 1,"🕯 Доджі→BUY"
         if doji and c[-1]<o[-1]: return -1,"🕯 Доджі→SELL"
         return 0,""
-    pat_val, pat_lbl = candle_pat()
+    pat_val,pat_lbl = candle_pat()
+
+    # ══ ГОЛОСУВАННЯ З ВАГАМИ ═════════════════════════
+    # Прибрано: Williams%R, STC, Momentum, Fibonacci
+    # Додано: RSI дивергенція, ATR фільтр, BB squeeze
     votes=[]
     def v(n,val,lbl,w=1.0): votes.append({"n":n,"v":val,"l":lbl,"w":w})
-    if rsi<25:    v("RSI",1,f"RSI {rsi} — сильна перепроданість 🔥",2.5)
-    elif rsi>75:  v("RSI",-1,f"RSI {rsi} — сильна перекупленість 🔥",2.5)
-    elif rsi<40:  v("RSI",1,f"RSI {rsi} — перепроданість",2.0)
-    elif rsi>60:  v("RSI",-1,f"RSI {rsi} — перекупленість",2.0)
-    elif rsi<48:  v("RSI",1,f"RSI {rsi} — бичачий нахил",1.0)
-    elif rsi>52:  v("RSI",-1,f"RSI {rsi} — ведмежий нахил",1.0)
-    else:         v("RSI",0,f"RSI {rsi} — нейтраль",0.3)
-    if macd>0 and mh>0:   v("MACD",1,"MACD: лінія+гіст ▲ ✅",2.0)
-    elif macd<0 and mh<0: v("MACD",-1,"MACD: лінія+гіст ▼ ✅",2.0)
-    elif mh>0:            v("MACD",1,"MACD: гіст зростає",1.0)
-    elif mh<0:            v("MACD",-1,"MACD: гіст падає",1.0)
-    else:                 v("MACD",0,"MACD нейтраль",0.3)
+
+    # RSI (вага 2.0-3.0)
+    if rsi<25:    v("RSI",1,f"RSI {rsi} — сильна перепроданість 🔥",3.0)
+    elif rsi>75:  v("RSI",-1,f"RSI {rsi} — сильна перекупленість 🔥",3.0)
+    elif rsi<38:  v("RSI",1,f"RSI {rsi} — перепроданість",2.0)
+    elif rsi>62:  v("RSI",-1,f"RSI {rsi} — перекупленість",2.0)
+    elif rsi<47:  v("RSI",1,f"RSI {rsi} — бичачий нахил",1.0)
+    elif rsi>53:  v("RSI",-1,f"RSI {rsi} — ведмежий нахил",1.0)
+
+    # RSI Дивергенція — найсильніший сигнал (вага 4.0)
+    if div_val!=0: v("RSI Div",div_val,div_lbl,4.0)
+
+    # MACD (вага 1.5-2.5)
+    if macd>0 and mh>0:   v("MACD",1,"MACD: лінія+гіст ▲ ✅",2.5)
+    elif macd<0 and mh<0: v("MACD",-1,"MACD: лінія+гіст ▼ ✅",2.5)
+    elif mh>0:            v("MACD",1,"MACD: гіст зростає",1.5)
+    elif mh<0:            v("MACD",-1,"MACD: гіст падає",1.5)
+
+    # EMA 9/21 (вага 2.0)
     if e9>e21*1.0002:   v("EMA9/21",1,"EMA9 > EMA21 ▲",2.0)
     elif e9<e21*0.9998: v("EMA9/21",-1,"EMA9 < EMA21 ▼",2.0)
-    else:               v("EMA9/21",0,"EMA9 ≈ EMA21",0.3)
+
+    # EMA 50 (вага 1.5)
     if live>e50*1.001:   v("EMA50",1,"Ціна вище EMA50",1.5)
     elif live<e50*0.999: v("EMA50",-1,"Ціна нижче EMA50",1.5)
-    if k_val<20:   v("Stoch",1,f"Stoch {k_val} — перепроданість ✅",2.0)
-    elif k_val>80: v("Stoch",-1,f"Stoch {k_val} — перекупленість ✅",2.0)
+
+    # Stochastic (вага 2.0-2.5)
+    if k_val<15:   v("Stoch",1,f"Stoch {k_val} — сильна перепроданість 🔥",2.5)
+    elif k_val>85: v("Stoch",-1,f"Stoch {k_val} — сильна перекупленість 🔥",2.5)
+    elif k_val<30: v("Stoch",1,f"Stoch {k_val} — перепроданість",2.0)
+    elif k_val>70: v("Stoch",-1,f"Stoch {k_val} — перекупленість",2.0)
     elif k_val<45: v("Stoch",1,f"Stoch {k_val} — BUY зона",1.0)
     elif k_val>55: v("Stoch",-1,f"Stoch {k_val} — SELL зона",1.0)
-    if bb<10:     v("BB",1,"BB нижня смуга BUY 🔥",2.0)
-    elif bb>90:   v("BB",-1,"BB верхня смуга SELL 🔥",2.0)
-    elif bb<25:   v("BB",1,f"BB нижня зона {bb}%",1.0)
-    elif bb>75:   v("BB",-1,f"BB верхня зона {bb}%",1.0)
-    if willr<-85:   v("W%R",1,f"W%R {willr} — сильна перепроданість 🔥",2.0)
-    elif willr>-15: v("W%R",-1,f"W%R {willr} — сильна перекупленість 🔥",2.0)
-    elif willr<-60: v("W%R",1,f"W%R {willr} — перепроданість",1.0)
-    else:           v("W%R",-1,f"W%R {willr} — перекупленість",1.0)
-    if stc is not None:
-        if stc<15:   v("STC",1,f"STC {stc} — сильний BUY 🔥🔥",3.5)
-        elif stc>85: v("STC",-1,f"STC {stc} — сильний SELL 🔥🔥",3.5)
-        elif stc<30: v("STC",1,f"STC {stc} — BUY зона 🔥",2.5)
-        elif stc>70: v("STC",-1,f"STC {stc} — SELL зона 🔥",2.5)
-        elif stc<50: v("STC",1,f"STC {stc} — зростає",1.0)
-        else:        v("STC",-1,f"STC {stc} — падає",1.0)
-    if mom>0.2:    v("Momentum",1,f"Mom +{mom}% бичачий",1.5)
-    elif mom<-0.2: v("Momentum",-1,f"Mom {mom}% ведмежий",1.5)
-    if pat_val!=0: v("Патерн",pat_val,pat_lbl,2.0)
-    if sr_val!=0:  v("S/R",sr_val,sr_lbl,2.5)
+
+    # Bollinger Bands (вага 2.0-2.5)
+    if bb<8:      v("BB",1,"BB нижня смуга BUY 🔥",2.5)
+    elif bb>92:   v("BB",-1,"BB верхня смуга SELL 🔥",2.5)
+    elif bb<22:   v("BB",1,f"BB нижня зона {bb}%",2.0)
+    elif bb>78:   v("BB",-1,f"BB верхня зона {bb}%",2.0)
+
+    # BB Squeeze — після стиску зазвичай сильний рух
+    if bb_sq:
+        lbl="🔀 BB Squeeze — очікується сильний рух"
+        if bb<50: v("BB Sq",1,lbl,1.5)
+        else:     v("BB Sq",-1,lbl,1.5)
+
+    # Свічкові патерни (вага 2.5-3.5)
+    if pat_val!=0:
+        strong_pat = "поглинання" in pat_lbl
+        v("Патерн",pat_val,pat_lbl,3.5 if strong_pat else 2.5)
+
+    # S/R рівні (вага 3.0)
+    if sr_val!=0: v("S/R",sr_val,sr_lbl,3.0)
+
+    # Heikin Ashi (вага 3.0-4.0) — найважливіший для бінарних
     if ha_val!=0:
         strong="🔥" in ha_lbl
-        v("Heikin Ashi",ha_val,ha_lbl,3.5 if strong else 2.5)
+        v("Heikin Ashi",ha_val,ha_lbl,4.0 if strong else 3.0)
+
+    # Parabolic SAR (вага 2.5-4.0)
     if psar_val!=0:
         fresh="свіжий" in psar_lbl or "розворот" in psar_lbl
-        v("Parab SAR",psar_val,psar_lbl,3.0 if fresh else 2.0)
-    if fib_val!=0: v("Fibonacci",fib_val,fib_lbl,2.0)
+        v("Parab SAR",psar_val,psar_lbl,4.0 if fresh else 2.5)
+
+    # ══ ВАГИ ПО ТАЙМФРЕЙМАХ ══════════════════════════
     tf_map_w={
-        "1":{"Heikin Ashi":1.8,"Parab SAR":1.6,"STC":1.4,"Stoch":1.4,"Momentum":1.5,"MACD":0.6,"EMA50":0.4},
-        "3":{"Heikin Ashi":1.6,"Parab SAR":1.5,"STC":1.5,"EMA9/21":1.3,"Stoch":1.3,"Momentum":1.4,"Fibonacci":1.3,"MACD":0.8,"EMA50":0.6},
-        "5":{"Heikin Ashi":1.6,"Parab SAR":1.5,"STC":1.5,"EMA9/21":1.3,"Stoch":1.3,"Momentum":1.4,"Fibonacci":1.3,"MACD":0.8,"EMA50":0.6},
-        "15":{"EMA50":1.5,"MACD":1.3,"S/R":1.5,"RSI":1.2,"Fibonacci":1.4,"Parab SAR":1.2},
-        "30":{"EMA50":1.5,"MACD":1.3,"S/R":1.5,"RSI":1.2,"Fibonacci":1.4},
-        "60":{"EMA50":1.6,"MACD":1.4,"S/R":1.6,"RSI":1.3,"Fibonacci":1.5},
+        "1": {"Heikin Ashi":2.0,"Parab SAR":1.8,"Патерн":2.0,"Stoch":1.5,"BB":1.5,"RSI Div":1.5,"MACD":0.5,"EMA50":0.3},
+        "3": {"Heikin Ashi":1.8,"Parab SAR":1.6,"Патерн":1.8,"Stoch":1.4,"BB":1.4,"RSI Div":1.6,"EMA9/21":1.2,"MACD":0.7},
+        "5": {"Heikin Ashi":1.8,"Parab SAR":1.6,"Патерн":1.7,"Stoch":1.3,"BB":1.4,"RSI Div":1.7,"EMA9/21":1.3,"MACD":0.8},
+        "15":{"EMA50":1.6,"MACD":1.4,"S/R":1.6,"RSI":1.3,"RSI Div":1.8,"Parab SAR":1.3,"EMA9/21":1.4},
+        "30":{"EMA50":1.7,"MACD":1.5,"S/R":1.7,"RSI":1.4,"RSI Div":1.9,"EMA9/21":1.5},
+        "60":{"EMA50":1.8,"MACD":1.6,"S/R":1.8,"RSI":1.5,"RSI Div":2.0,"EMA9/21":1.6},
     }
     wm=tf_map_w.get(tf,{})
     for vt in votes:
         if vt["n"] in wm: vt["w"]*=wm[vt["n"]]
-    buy_w=sum(x["w"] for x in votes if x["v"]==1)
+
+    buy_w =sum(x["w"] for x in votes if x["v"]==1)
     sell_w=sum(x["w"] for x in votes if x["v"]==-1)
     bc=sum(1 for x in votes if x["v"]==1)
     sc=sum(1 for x in votes if x["v"]==-1)
@@ -710,42 +746,53 @@ def generate_signal(pair_name,tf):
     is_buy=buy_w>=sell_w
     dom=max(buy_w,sell_w)
     ratio=dom/max(1e-9,tot)
-    top_ns=["STC","RSI","EMA9/21","Stoch","Heikin Ashi","Parab SAR","Fibonacci"]
+
+    top_ns=["RSI","RSI Div","EMA9/21","Stoch","Heikin Ashi","Parab SAR","S/R"]
     top_vs=[next((x["v"] for x in votes if x["n"]==n),0) for n in top_ns]
-    top_a=[v for v in top_vs if v!=0]
-    c_agree=sum(1 for v in top_a if (v==1)==is_buy)
+    top_a=[vv for vv in top_vs if vv!=0]
+    c_agree=sum(1 for vv in top_a if (vv==1)==is_buy)
     consensus=f"{c_agree}/{len(top_a)}" if top_a else "—"
+
+    # ══ РОЗРАХУНОК ТОЧНОСТІ ══════════════════════════
     adx_ok=adx>=20
-    adx_b=min(12,adx//3) if adx_ok else -5
-    cons_b=round(c_agree/max(1,len(top_a))*12)
-    pat_b=5 if (pat_val==1 and is_buy) or (pat_val==-1 and not is_buy) else 0
-    sr_b=6 if (sr_val==1 and is_buy) or (sr_val==-1 and not is_buy) else 0
-    tf_b={"1":0,"3":6,"5":5,"15":3,"30":2,"60":1}.get(tf,0)
-    ha_b=5 if (ha_val==1 and is_buy) or (ha_val==-1 and not is_buy) else 0
-    psar_b=5 if (psar_val==1 and is_buy) or (psar_val==-1 and not is_buy) else 0
-    acc_raw=round(54+ratio*26+adx_b+cons_b+pat_b+sr_b+tf_b+ha_b+psar_b)
-    acc=min(94,max(68,round(acc_raw*sess_mult)))
-    stc_v = next((x["v"] for x in votes if x["n"]=="STC"), 0)
-    rsi_v = next((x["v"] for x in votes if x["n"]=="RSI"), 0)
-    psar_v= next((x["v"] for x in votes if x["n"]=="Parab SAR"), 0)
-    ha_v  = next((x["v"] for x in votes if x["n"]=="Heikin Ashi"), 0)
-    stc_blocks = (stc is not None) and ((stc>=85 and is_buy) or (stc<=15 and not is_buy))
-    rsi_extreme = (rsi>=75 and is_buy) or (rsi<=25 and not is_buy)
-    psar_against= psar_v!=0 and (psar_v==1)!=is_buy and ("розворот" in psar_lbl or "свіжий" in psar_lbl)
-    ha_against  = ha_v!=0 and (ha_v==1)!=is_buy and "🔥" in ha_lbl
+    adx_b=min(14,adx//3) if adx_ok else -6
+    cons_b=round(c_agree/max(1,len(top_a))*14)
+    pat_b=7 if (pat_val==1 and is_buy) or (pat_val==-1 and not is_buy) else 0
+    sr_b =7 if (sr_val==1  and is_buy) or (sr_val==-1  and not is_buy) else 0
+    ha_b =6 if (ha_val==1  and is_buy) or (ha_val==-1  and not is_buy) else 0
+    psar_b=6 if (psar_val==1 and is_buy) or (psar_val==-1 and not is_buy) else 0
+    div_b=8 if (div_val==1  and is_buy) or (div_val==-1  and not is_buy) else 0
+    atr_b=3 if atr_ok else -4  # бонус якщо є волатильність
+    tf_b={"1":0,"3":5,"5":5,"15":3,"30":2,"60":1}.get(tf,0)
+    acc_raw=round(52+ratio*28+adx_b+cons_b+pat_b+sr_b+ha_b+psar_b+div_b+atr_b)
+    acc=min(95,max(65,round(acc_raw*sess_mult)))
+
+    # ══ БЛОКУВАННЯ СИГНАЛУ ═══════════════════════════
+    rsi_v  = next((x["v"] for x in votes if x["n"]=="RSI"),0)
+    psar_v = next((x["v"] for x in votes if x["n"]=="Parab SAR"),0)
+    ha_v   = next((x["v"] for x in votes if x["n"]=="Heikin Ashi"),0)
+
+    rsi_extreme  = (rsi>=78 and is_buy) or (rsi<=22 and not is_buy)
+    psar_against = psar_v!=0 and (psar_v==1)!=is_buy and "свіжий" in psar_lbl
+    ha_against   = ha_v!=0  and (ha_v==1)!=is_buy  and "🔥" in ha_lbl
+    flat_market  = not atr_ok  # ринок стоїть на місці
+
     block_reasons=[]
-    if stc_blocks:   block_reasons.append(f"STC={stc:.0f} {'перекупленість' if is_buy else 'перепроданість'}")
-    if rsi_extreme:  block_reasons.append(f"RSI={rsi} {'перекупленість' if is_buy else 'перепроданість'}")
-    if psar_against: block_reasons.append("PSAR свіжий розворот проти")
-    if ha_against:   block_reasons.append("HA сильний сигнал проти")
-    hard_block = stc_blocks or (rsi_extreme and (psar_against or ha_against)) or len(block_reasons)>=2
+    if rsi_extreme:      block_reasons.append(f"RSI={rsi} {'перекупленість' if is_buy else 'перепроданість'}")
+    if psar_against:     block_reasons.append("PSAR свіжий розворот проти сигналу")
+    if ha_against:       block_reasons.append("HA сильний сигнал проти напрямку")
+    if flat_market:      block_reasons.append("⚠️ Flat ринок — низька волатильність")
+    if sess_open_blocked:block_reasons.append(sess_open_msg)
+
+    hard_block=(rsi_extreme and (psar_against or ha_against)) or len(block_reasons)>=2 or flat_market
     if hard_block:
-        strength="⛔ НЕ ТОРГУВАТИ"; blocked=True; acc=min(acc,60)
-    elif not adx_ok and ratio<0.65: strength="⛔ ФІЛЬТР ADX"; blocked=True
+        strength="⛔ НЕ ТОРГУВАТИ"; blocked=True; acc=min(acc,62)
+    elif not adx_ok and ratio<0.63: strength="⛔ ФІЛЬТР ADX"; blocked=True
     elif ratio<0.58: strength="⚠️ СЛАБКИЙ"; blocked=False
     elif ratio<0.68: strength="✅ СЕРЕДНІЙ"; blocked=False
     elif ratio<0.80: strength="🔥 СИЛЬНИЙ"; blocked=False
     else:            strength="🔥🔥 ДУЖЕ СИЛЬНИЙ"; blocked=False
+
     d_=m["d"]
     if atr==0: atr=live*0.001
     tp_m={"1":1.3,"3":1.5,"5":1.7,"15":2.0,"30":2.5,"60":3.0}.get(tf,1.7)
@@ -753,13 +800,15 @@ def generate_signal(pair_name,tf):
     tp=round(live+atr*tp_m,d_) if is_buy else round(live-atr*tp_m,d_)
     sl=round(live-atr*sl_m,d_) if is_buy else round(live+atr*sl_m,d_)
     rr=round(tp_m/sl_m,1)
+
     return {"is_buy":is_buy,"acc":acc,"strength":strength,"blocked":blocked,
             "live":live,"tp":tp,"sl":sl,"rr":rr,"adx":adx,"adx_ok":adx_ok,
-            "rsi":rsi,"stc":stc,"ha_lbl":ha_lbl,"psar_lbl":psar_lbl,
-            "fib_lbl":fib_lbl,"sr_lbl":sr_lbl,"pat_lbl":pat_lbl,
+            "rsi":rsi,"stc":None,"ha_lbl":ha_lbl,"psar_lbl":psar_lbl,
+            "fib_lbl":"","sr_lbl":sr_lbl,"pat_lbl":pat_lbl,"div_lbl":div_lbl,
             "votes":votes,"bc":bc,"sc":sc,"buy_w":round(buy_w,1),"sell_w":round(sell_w,1),
             "consensus":consensus,"sess":sess_name,"sess_q":sess_q,
-            "real":real,"is_otc":is_otc,"block_reasons":block_reasons}
+            "real":real,"is_otc":is_otc,"block_reasons":block_reasons,
+            "bb_squeeze":bb_sq,"atr_ok":atr_ok}
 
 def generate_chart(pair, tf, c, h, l, o, sig):
     n = min(40, len(c))
@@ -862,8 +911,8 @@ def format_signal(pair, tf, d):
     now_dt = datetime.now(KYIV)
     tf_lbl = TIMEFRAMES.get(tf, CRYPTO_TF.get(tf, STOCKS_TF.get(tf, tf+"хв")))
 
-    # ── РОЗРАХУНОК ЧАСУ ВІДКРИТТЯ ТА ВХОДУ ────────────
-    open_time, entry_time, exit_time, closes_in_str = get_entry_time(tf)
+    # ── РОЗРАХУНОК ЧАСУ ВХОДУ ──────────────────────────
+    entry_time, exit_time, closes_in_str = get_entry_time(tf)
     # ────────────────────────────────────────────────────
 
     is_buy   = d["is_buy"]
@@ -889,9 +938,11 @@ def format_signal(pair, tf, d):
     new_inds = []
     if d.get("ha_lbl"):   new_inds.append(f"🕯 {d['ha_lbl']}")
     if d.get("psar_lbl"): new_inds.append(f"📍 {d['psar_lbl']}")
-    if d.get("fib_lbl"):  new_inds.append(f"📐 {d['fib_lbl']}")
+    if d.get("div_lbl"):  new_inds.append(f"📊 {d['div_lbl']}")
     if d.get("sr_lbl"):   new_inds.append(f"📊 S/R: {d['sr_lbl']}")
     if d.get("pat_lbl"):  new_inds.append(f"🕯 {d['pat_lbl']}")
+    if d.get("bb_squeeze"): new_inds.append("🔀 BB Squeeze — очікується сильний рух")
+    if not d.get("atr_ok",True): new_inds.append("⚠️ Низька волатильність (flat)")
     new_ind_txt = ("\n".join(new_inds)+"\n\n") if new_inds else ""
 
     stc = d.get("stc")
@@ -923,11 +974,10 @@ def format_signal(pair, tf, d):
         f"🏷 *{pair}*  ⏱ {tf_lbl}  {src}",
         f"📍 {d['sess']}",
         "",
-        # ── ЧАС ВІДКРИТТЯ ТА ВХОДУ ─────────────────────
-        f"🕐 *Час відкриття угоди: {open_time}*",
+        # ── ЧАС ВХОДУ ──────────────────────────────────
         f"⏰ Свічка закриється через: *{closes_in_str}*",
-        f"🚀 *Вхід (наступна свічка): {entry_time}*",
-        f"🏁 *Вихід з угоди: {exit_time}*",
+        f"🚀 *Час входу: {entry_time}*",
+        f"🏁 *Час виходу: {exit_time}*",
         # ────────────────────────────────────────────────
         "",
         f"📈 *Сила тренду* — {t_str} *{t_pct}%*",
@@ -1349,33 +1399,28 @@ if __name__=="__main__":
     print("✅ SIGNAL AI Bot v2.0 запущено!")
     threading.Thread(target=auto_signal_loop, daemon=True).start()
     threading.Thread(target=reversal_monitor, daemon=True).start()
-    # ── Зачищаємо попередні сесії ──────────────────────
-    for attempt in range(10):
+    for attempt in range(8):
         try: bot.close()
         except: pass
         try:
             bot.delete_webhook(drop_pending_updates=True)
-            logger.info("✅ Webhook видалено"); break
+            logger.info("Webhook видалено"); break
         except Exception as e:
             logger.warning(f"delete_webhook спроба {attempt+1}: {e}")
-            time.sleep(5 + attempt * 3)
-    logger.info("⏳ Чекаємо 20 сек перед polling...")
-    time.sleep(20)
-    # ── Головний цикл polling ──────────────────────────
+            time.sleep(3 + attempt * 2)
+    logger.info("Чекаємо 15 сек...")
+    time.sleep(15)
     while True:
         try:
-            logger.info("🚀 Starting polling...")
+            logger.info("Starting polling...")
             bot.infinity_polling(timeout=25, long_polling_timeout=20,
                 skip_pending=True, none_stop=True, restart_on_change=False,
                 allowed_updates=["message","callback_query"])
         except Exception as e:
             err = str(e)
             logger.error(f"Polling crashed: {err}")
-            if "409" in err:
-                logger.warning("⚠️ 409 Conflict — чекаємо 60 сек...")
-                time.sleep(60)
-            else:
-                time.sleep(10)
+            if "409" in err: time.sleep(30)
+            else: time.sleep(10)
             try: bot.close()
             except: pass
             try: bot.delete_webhook(drop_pending_updates=True); time.sleep(5)
