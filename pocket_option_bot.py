@@ -1,20 +1,19 @@
 #!/usr/bin/env python3
 """SIGNAL AI Telegram Bot v2.0 — Heikin Ashi + Parabolic SAR + Fibonacci + S/R + Sessions"""
 import os, math, time, json, threading, requests, io
+import telebot
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from datetime import datetime, timezone, timedelta
-import pytz
 from telebot import TeleBot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-BOT_TOKEN  = "8542231431:AAHJ-9Rwr_taqFMaBd9YBau8bVcMU38633Y"
-TWELVE_KEY = os.environ.get("TWELVE_KEY")
-if not TWELVE_KEY:
-    TWELVE_KEY = "99b3ca01dbdf45ccb2f5968b16af1c82"
+BOT_TOKEN  = os.environ.get("BOT_TOKEN", "8542231431:AAHJ-9Rwr_taqFMaBd9YBau8bVcMU38633Y")
+TWELVE_KEY = os.environ.get("TWELVE_KEY", "99b3ca01dbdf45ccb2f5968b16af1c82")
 
-KYIV = KYIV = pytz.timezone("Europe/Kiev")  # ← ДОДАНО
+import pytz
+KYIV = pytz.timezone("Europe/Kiev")
 
 # ══ РОЗРАХУНОК ЧАСУ ВХОДУ ══════════════════════════════
 def get_entry_time(tf: str):
@@ -237,7 +236,8 @@ def reversal_monitor():
                 if now - _last_checked.get(check_key, 0) < CHECK_INTERVAL:
                     continue
                 _last_checked[check_key] = now
-                from_cache = _candle_cache.get(f"{pair}_{tf}")
+                # _candle_cache визначається пізніше але доступний глобально під час виклику
+                from_cache = globals().get("_candle_cache", {}).get(f"{pair}_{tf}")
                 if not from_cache:
                     continue
                 try:
@@ -1398,29 +1398,47 @@ if __name__=="__main__":
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
     logger = logging.getLogger(__name__)
     print("✅ SIGNAL AI Bot v2.0 запущено!")
+
+    # ── Реєстрація меню команд у Telegram ─────────────
+    try:
+        bot.set_my_commands([
+            telebot.types.BotCommand("start",     "🚀 Головне меню"),
+            telebot.types.BotCommand("scan",      "🔍 Сканер сигналів"),
+            telebot.types.BotCommand("subscribe", "🔔 Авто-сигнали вкл/викл"),
+            telebot.types.BotCommand("journal",   "📓 Журнал угод"),
+            telebot.types.BotCommand("stats",     "📊 Статистика"),
+            telebot.types.BotCommand("mtf",       "📈 Мульти-таймфрейм аналіз"),
+            telebot.types.BotCommand("menu",      "🏠 Відкрити меню"),
+        ])
+        logger.info("✅ Меню команд зареєстровано")
+    except Exception as e:
+        logger.warning(f"Меню команд: {e}")
+
     threading.Thread(target=auto_signal_loop, daemon=True).start()
     threading.Thread(target=reversal_monitor, daemon=True).start()
-    for attempt in range(8):
+    for attempt in range(10):
         try: bot.close()
         except: pass
         try:
             bot.delete_webhook(drop_pending_updates=True)
-            logger.info("Webhook видалено"); break
+            logger.info("✅ Webhook видалено"); break
         except Exception as e:
             logger.warning(f"delete_webhook спроба {attempt+1}: {e}")
-            time.sleep(3 + attempt * 2)
-    logger.info("Чекаємо 15 сек...")
-    time.sleep(15)
+            time.sleep(5 + attempt * 3)
+    logger.info("⏳ Чекаємо 20 сек...")
+    time.sleep(20)
     while True:
         try:
-            logger.info("Starting polling...")
+            logger.info("🚀 Starting polling...")
             bot.infinity_polling(timeout=25, long_polling_timeout=20,
                 skip_pending=True, none_stop=True, restart_on_change=False,
                 allowed_updates=["message","callback_query"])
         except Exception as e:
             err = str(e)
             logger.error(f"Polling crashed: {err}")
-            if "409" in err: time.sleep(30)
+            if "409" in err:
+                logger.warning("⚠️ 409 Conflict — чекаємо 60 сек...")
+                time.sleep(60)
             else: time.sleep(10)
             try: bot.close()
             except: pass
