@@ -5,6 +5,7 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from datetime import datetime, timezone, timedelta
+import pytz
 from telebot import TeleBot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 
@@ -13,7 +14,7 @@ TWELVE_KEY = os.environ.get("TWELVE_KEY")
 if not TWELVE_KEY:
     TWELVE_KEY = "99b3ca01dbdf45ccb2f5968b16af1c82"
 
-KYIV = timezone(timedelta(hours=2))  # ← ДОДАНО
+KYIV = KYIV = pytz.timezone("Europe/Kiev")  # ← ДОДАНО
 
 # ══ РОЗРАХУНОК ЧАСУ ВХОДУ ══════════════════════════════
 def get_entry_time(tf: str):
