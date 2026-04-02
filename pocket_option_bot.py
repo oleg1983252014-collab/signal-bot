@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 """SIGNAL AI Telegram Bot v2.0 — Heikin Ashi + Parabolic SAR + Fibonacci + S/R + Sessions"""
-import os, math, time, json, threading, requests, io
+import os, math, time, json, threading, requests, io, hmac, hashlib
+try:
+    from flask import Flask, request as flask_request, jsonify
+    FLASK_OK = True
+except ImportError:
+    FLASK_OK = False
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
@@ -12,6 +17,31 @@ BOT_TOKEN  = os.environ.get("BOT_TOKEN")
 TWELVE_KEY = os.environ.get("TWELVE_KEY")
 if not TWELVE_KEY:
     TWELVE_KEY = "99b3ca01dbdf45ccb2f5968b16af1c82"  # резерв для локального запуску
+
+# ══ TRADINGVIEW WEBHOOK ════════════════════════════════
+# Секретний токен для захисту вебхука (встанови змінну TV_WEBHOOK_SECRET)
+TV_WEBHOOK_SECRET = os.environ.get("TV_WEBHOOK_SECRET", "signal_ai_secret_2024")
+TV_WEBHOOK_PORT   = int(os.environ.get("TV_WEBHOOK_PORT", "8080"))
+
+# {chat_id: bool} — підписники TradingView сигналів (окремо від авто-сигналів)
+_tv_subscribers = set()
+TV_SUBS_FILE = "tv_subscribers.json"
+
+def _load_tv_subscribers():
+    try:
+        if os.path.exists(TV_SUBS_FILE):
+            with open(TV_SUBS_FILE) as f:
+                return set(json.load(f).get("tv_subscribers", []))
+    except: pass
+    return set()
+
+def _save_tv_subscribers():
+    try:
+        with open(TV_SUBS_FILE, "w") as f:
+            json.dump({"tv_subscribers": list(_tv_subscribers)}, f)
+    except: pass
+
+_tv_subscribers = _load_tv_subscribers()
 
 # ══ АВТО-СИГНАЛИ: список підписників ══════════════════
 SUBSCRIBERS_FILE = "subscribers.json"   # зберігаємо підписників між рестартами
@@ -1183,6 +1213,7 @@ def main_kb():
            InlineKeyboardButton("📊 Статистика",callback_data="stats"))
     kb.add(InlineKeyboardButton("🕐 Сесії",callback_data="sessions"),
            InlineKeyboardButton("ℹ️ Про бота",callback_data="about"))
+    kb.add(InlineKeyboardButton("📡 TradingView сигнали",callback_data="tv_subscribe"))
     return kb
 
 def pairs_kb(pairs,back):
@@ -1220,6 +1251,7 @@ def start_kb():
         KeyboardButton("🔍 Сканер"),  KeyboardButton("📊 Статистика"),
         KeyboardButton("🕐 Сесії"),   KeyboardButton("🏠 Меню"),
         KeyboardButton("🔔 Авто-сигнали"), KeyboardButton("📓 Журнал"),
+        KeyboardButton("📡 TV Сигнали"),
     )
     return kb
 
@@ -1235,6 +1267,7 @@ _REPLY_MAP = {
     "🏠 МЕНЮ":             "main",
     "🔔 АВТО-СИГНАЛИ":    "auto_signals",
     "📓 ЖУРНАЛ":           "journal",
+    "📡 TV СИГНАЛИ":       "tv_subscribe",
 }
 
 def send_main(cid,mid=None):
@@ -1368,9 +1401,18 @@ _PAIR_LOOKUP.update({
 def normalize_pair(text):
     """Перетворює довільний текст в канонічну назву пари.
     Підтримує: EURUSD, EUR/USD, eurusd, chfjpy, btc, bitcoin, AAPL, apple,
-               EURUSD OTC, eurusdotc, EUR/USD OTC
+               EURUSD OTC, eurusdotc, EUR/USD OTC,
+               OANDA:EURUSD, FX:GBPUSD, BINANCE:BTCUSDT (TradingView формат)
     """
     t = text.strip().upper().replace("-","").replace("_","")
+
+    # TradingView формат: "OANDA:EURUSD" → "EURUSD", "BINANCE:BTCUSDT" → "BTCUSDT"
+    if ":" in t:
+        t = t.split(":")[-1]
+        # BTCUSDT → BTCUSD (прибираємо зайву T)
+        if t.endswith("USDT"):
+            t = t[:-1]  # BTCUSDT → BTCUSD
+        t = t.replace("-","").replace("_","")
 
     # Спроба 1: як є
     if t in _PAIR_LOOKUP: return _PAIR_LOOKUP[t]
@@ -1428,6 +1470,50 @@ def cmd_subscribe(msg):
             "⚡ Найсильніші сигнали (≥85%) будуть надходити автоматично кожні 5 хвилин.\n\n"
             "📌 Щоб вимкнути — надішли /auto знову.",
             parse_mode="Markdown")
+
+@bot.message_handler(commands=["tv","tvwebhook","tradingview"])
+def cmd_tv_info(msg):
+    """Інформація про TradingView Webhook та управління підпискою"""
+    cid = msg.chat.id
+    status = "🟢 УВІМКНЕНО" if cid in _tv_subscribers else "🔴 ВИМКНЕНО"
+    auto_status = "🟢 УВІМКНЕНО" if cid in _subscribers else "🔴 ВИМКНЕНО"
+    wh_url = f"http://YOUR_SERVER:{TV_WEBHOOK_PORT}/tv_webhook"
+
+    kb = InlineKeyboardMarkup(row_width=1)
+    if cid in _tv_subscribers:
+        kb.add(InlineKeyboardButton("🔕 Відписатись від TV сигналів", callback_data="tv_subscribe"))
+    else:
+        kb.add(InlineKeyboardButton("📡 Підписатись на TV сигнали", callback_data="tv_subscribe"))
+    kb.add(InlineKeyboardButton("🏠 Меню", callback_data="main"))
+
+    bot.send_message(
+        cid,
+        f"📡 *TradingView Webhook*\n\n"
+        f"Статус: *{status}*\n"
+        f"Авто-сигнали: *{auto_status}*\n\n"
+        f"*Webhook URL:*\n`{wh_url}`\n\n"
+        f"*Секрет:* `{TV_WEBHOOK_SECRET}`\n\n"
+        f"*JSON шаблон для Alert Message:*\n"
+        "```\n"
+        "{\n"
+        f'  "secret": "{TV_WEBHOOK_SECRET}",\n'
+        '  "pair": "{{ticker}}",\n'
+        '  "tf": "5",\n'
+        '  "direction": "{{strategy.order.action}}",\n'
+        '  "price": "{{close}}",\n'
+        '  "indicator": "Назва стратегії",\n'
+        '  "acc": "88"\n'
+        "}\n"
+        "```\n\n"
+        "*Підтримувані значення direction:*\n"
+        "`BUY` / `SELL` / `LONG` / `SHORT`\n\n"
+        "*Підтримувані формати pair:*\n"
+        "`EURUSD` `EUR/USD` `OANDA:EURUSD`\n"
+        "`FX:GBPUSD` `BINANCE:BTCUSDT`\n\n"
+        "💡 _Замість `YOUR_SERVER` вкажи реальну IP/домен сервера_",
+        parse_mode="Markdown",
+        reply_markup=kb
+    )
 
 @bot.message_handler(commands=["journal"])
 def cmd_journal(msg):
@@ -1499,6 +1585,34 @@ def cmd_text(msg):
                 _subscribers.add(cid)
                 _save_subscribers()
                 bot.send_message(cid, "🔔 *Авто-сигнали увімкнено!*\nСигнали ≥85% кожні 5 хвилин.", parse_mode="Markdown")
+        elif action == "tv_subscribe":
+            if cid in _tv_subscribers:
+                _tv_subscribers.discard(cid)
+                _save_tv_subscribers()
+                bot.send_message(cid, "🔕 *TradingView сигнали вимкнено*", parse_mode="Markdown")
+            else:
+                _tv_subscribers.add(cid)
+                _save_tv_subscribers()
+                wh_url = f"http://YOUR_SERVER:{TV_WEBHOOK_PORT}/tv_webhook"
+                bot.send_message(
+                    cid,
+                    "📡 *TradingView сигнали увімкнено!*\n\n"
+                    "*Webhook URL для TradingView:*\n"
+                    f"`{wh_url}`\n\n"
+                    "*JSON шаблон алерту:*\n"
+                    "```\n"
+                    "{\n"
+                    f'  "secret": "{TV_WEBHOOK_SECRET}",\n'
+                    '  "pair": "{{ticker}}",\n'
+                    '  "tf": "5",\n'
+                    '  "direction": "{{strategy.order.action}}",\n'
+                    '  "price": "{{close}}",\n'
+                    '  "indicator": "MyStrategy",\n'
+                    '  "acc": "88"\n'
+                    "}\n"
+                    "```",
+                    parse_mode="Markdown"
+                )
         elif action == "journal":
             cmd_journal(msg)
         return
@@ -1569,9 +1683,41 @@ def handle_cb(call):
                 "• ADX < 20 → ⛔ блокування\n"
                 "• Торгова сесія → множник точності\n"
                 "• Консенсус 9 топ-індикаторів\n\n"
-                "📡 TwelveData API\n"
+                "📡 TwelveData API + TradingView Webhook\n"
                 "🎯 Точність: ~82-94%",
                 cid,mid,parse_mode="Markdown",reply_markup=main_kb())
+        elif d=="tv_subscribe":
+            if cid in _tv_subscribers:
+                _tv_subscribers.discard(cid)
+                _save_tv_subscribers()
+                bot.edit_message_text(
+                    "🔕 *TradingView сигнали вимкнено*\n\n"
+                    "Ви більше не отримуватимете алерти з TradingView.",
+                    cid, mid, parse_mode="Markdown", reply_markup=main_kb())
+            else:
+                _tv_subscribers.add(cid)
+                _save_tv_subscribers()
+                wh_url = f"http://YOUR_SERVER:{TV_WEBHOOK_PORT}/tv_webhook"
+                bot.edit_message_text(
+                    "📡 *TradingView сигнали увімкнено!*\n\n"
+                    "Ви будете отримувати сигнали напряму з TradingView.\n\n"
+                    "*Налаштування TradingView Alert:*\n"
+                    "1️⃣ Відкрий Alert → Webhook URL:\n"
+                    f"`{wh_url}`\n\n"
+                    "2️⃣ Message (JSON):\n"
+                    "```\n"
+                    "{\n"
+                    f'  "secret": "{TV_WEBHOOK_SECRET}",\n'
+                    '  "pair": "{{ticker}}",\n'
+                    '  "tf": "5",\n'
+                    '  "direction": "{{strategy.order.action}}",\n'
+                    '  "price": "{{close}}",\n'
+                    '  "indicator": "MyStrategy",\n'
+                    '  "acc": "88"\n'
+                    "}\n"
+                    "```\n\n"
+                    "✅ Готово! Сигнали надходитимуть автоматично.",
+                    cid, mid, parse_mode="Markdown", reply_markup=main_kb())
         elif d.startswith("pair_"):
             pair=d[5:]
             if pair not in ALL_PAIRS:
@@ -1611,6 +1757,172 @@ def handle_cb(call):
             try: bot.send_message(cid,"Оберіть категорію:",reply_markup=main_kb())
             except: pass
 
+
+# ══ TRADINGVIEW WEBHOOK СЕРВЕР ══════════════════════════
+# Очікуваний JSON від TradingView Alert:
+# {
+#   "secret":    "{{strategy.order.id}}",   ← або фіксований TV_WEBHOOK_SECRET
+#   "pair":      "EURUSD",
+#   "tf":        "5",
+#   "direction": "BUY",                     ← BUY | SELL
+#   "price":     "{{close}}",
+#   "indicator": "RSI+MACD",                ← назва стратегії (необов'язково)
+#   "acc":       "87"                        ← точність % (необов'язково)
+# }
+
+def format_tv_signal(data: dict) -> str:
+    """Форматує вхідний TradingView сигнал у повідомлення Telegram"""
+    pair      = data.get("pair", "N/A").upper().replace("_", "/")
+    tf        = data.get("tf", "?")
+    direction = data.get("direction", "").upper()
+    price     = data.get("price", "?")
+    indicator = data.get("indicator", "TradingView")
+    acc_raw   = data.get("acc", None)
+
+    is_buy  = direction in ("BUY", "LONG", "UP", "ВВЕРХ", "1")
+    arrow   = "⬆️" if is_buy else "⬇️"
+    dir_txt = "ВВЕРХ" if is_buy else "ВНИЗ"
+    dir_em  = "🟢" if is_buy else "🔴"
+
+    tf_lbl_map = {"1":"1хв","3":"3хв","5":"5хв","15":"15хв","30":"30хв","60":"1год","240":"4год"}
+    tf_lbl = tf_lbl_map.get(str(tf), f"{tf}хв")
+
+    now_dt  = datetime.now(timezone.utc) + timedelta(hours=2)
+    tf_hold = {"1":2,"3":4,"5":8,"15":20,"30":35,"60":70,"240":260}
+    try:
+        exp = (now_dt + timedelta(minutes=tf_hold.get(int(tf), 5))).strftime("%H:%M")
+    except:
+        exp = "—"
+
+    acc_line = f"\n🎯 Точність: *{acc_raw}%*" if acc_raw else ""
+    _, _, sess_mult = get_session()
+    sess_name, _, _ = get_session()
+
+    # Фільтр новин
+    has_news, news_warn = check_news_filter(pair)
+    news_line = f"\n{news_warn}\n" if has_news else ""
+
+    lines = [
+        "╔══ 📡 *TRADINGVIEW СИГНАЛ* ══╗",
+        "",
+        f"🏷 *{pair}*  ⏱ {tf_lbl}",
+        f"📍 {sess_name}",
+        "",
+        f"{dir_em} *Напрямок: {arrow} {dir_txt}*",
+        f"Утримувати до: *{exp}*",
+        "",
+        f"📊 Індикатор: _{indicator}_",
+        f"💰 Ціна входу: `{price}`",
+        acc_line,
+        news_line,
+        "└─────────────────────────┘",
+        "⚠️ _Не є фінансовою порадою_",
+    ]
+    return "\n".join(l for l in lines if l is not None)
+
+
+def start_tv_webhook():
+    """Запускає Flask HTTP-сервер для TradingView Webhook у фоновому потоці"""
+    if not FLASK_OK:
+        print("⚠️ Flask не встановлено — TV Webhook вимкнено. Встановіть: pip install flask")
+        return
+
+    app = Flask(__name__)
+
+    @app.route("/health", methods=["GET"])
+    def health():
+        return jsonify({"status": "ok", "tv_subscribers": len(_tv_subscribers)}), 200
+
+    @app.route("/tv_webhook", methods=["POST"])
+    def tv_webhook():
+        try:
+            data = flask_request.get_json(silent=True) or {}
+        except Exception:
+            return jsonify({"error": "invalid json"}), 400
+
+        # Перевірка секрету
+        incoming_secret = data.get("secret", "")
+        if not hmac.compare_digest(str(incoming_secret), str(TV_WEBHOOK_SECRET)):
+            print(f"[TV Webhook] ❌ Невірний secret: {incoming_secret!r}")
+            return jsonify({"error": "unauthorized"}), 403
+
+        pair_raw  = data.get("pair", "").strip()
+        direction = data.get("direction", "").upper()
+        tf        = str(data.get("tf", "5"))
+
+        if not pair_raw or not direction:
+            return jsonify({"error": "pair and direction required"}), 400
+
+        # Нормалізуємо пару (підтримка OANDA:EURUSD, FX:GBPUSD, BINANCE:BTCUSDT тощо)
+        pair = normalize_pair(pair_raw)
+        if not pair:
+            # fallback — просто uppercase + slash нормалізація
+            pair = pair_raw.upper().replace("_", "/")
+            if ":" in pair:
+                pair = pair.split(":")[-1]
+
+        print(f"[TV Webhook] ✅ Отримано: {pair_raw!r} → {pair} | {direction} | TF={tf}")
+
+        msg = format_tv_signal(data)
+        # Якщо пара є в нашому списку — додатково генеруємо внутрішній сигнал
+        extra_msg = None
+        sig = None
+        if pair in ALL_PAIRS or (pair + " OTC") in ALL_PAIRS:
+            try:
+                sig = generate_signal(pair, tf)
+                if sig:
+                    extra_msg = (
+                        f"\n🔬 *SIGNAL AI підтвердження:*\n"
+                        f"Точність: *{sig['acc']}%*  {sig['strength']}\n"
+                        f"ADX: *{sig['adx']}*  Консенсус: *{sig['consensus']}*"
+                    )
+            except Exception as e:
+                print(f"[TV Webhook] generate_signal error: {e}")
+
+        full_msg = msg + (extra_msg or "")
+
+        # Клавіатура результату (якщо пара відома)
+        kb = result_kb(pair, tf) if pair in ALL_PAIRS else None
+
+        # Розсилаємо підписникам TV
+        sent = 0
+        for cid in list(_tv_subscribers):
+            try:
+                bot.send_message(cid, full_msg, parse_mode="Markdown",
+                                 reply_markup=kb)
+                # Записуємо в журнал
+                is_buy_tv = direction in ("BUY", "LONG", "UP", "ВВЕРХ", "1")
+                price_tv  = data.get("price", sig["live"] if sig else 0)
+                acc_tv    = int(data.get("acc", sig["acc"] if sig else 80) or 80)
+                add_journal_entry(cid, pair, tf, is_buy_tv, acc_tv, price_tv)
+                sent += 1
+                time.sleep(0.05)
+            except Exception as e:
+                print(f"[TV Webhook] send error cid={cid}: {e}")
+
+        # Також розсилаємо звичайним авто-підписникам якщо сигнал сильний
+        acc_val = int(data.get("acc", 0) or 0)
+        if acc_val >= 85:
+            for cid in list(_subscribers) - _tv_subscribers:
+                try:
+                    bot.send_message(cid, f"📡 *TradingView алерт:*\n" + full_msg,
+                                     parse_mode="Markdown")
+                    time.sleep(0.05)
+                except: pass
+
+        print(f"[TV Webhook] Надіслано {sent} підписникам")
+        return jsonify({"ok": True, "sent": sent}), 200
+
+    def run():
+        app.run(host="0.0.0.0", port=TV_WEBHOOK_PORT, debug=False, use_reloader=False)
+
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    print(f"✅ TradingView Webhook сервер запущено на порту {TV_WEBHOOK_PORT}")
+    print(f"   URL: http://0.0.0.0:{TV_WEBHOOK_PORT}/tv_webhook")
+    print(f"   Secret: {TV_WEBHOOK_SECRET}")
+
+
 if __name__=="__main__":
     import logging
     logging.basicConfig(
@@ -1626,6 +1938,9 @@ if __name__=="__main__":
     threading.Thread(target=auto_signal_loop, daemon=True).start()
     threading.Thread(target=reversal_monitor, daemon=True).start()
     logger.info("Фонові потоки запущено: авто-сигнали + моніторинг розворотів")
+
+    # TradingView Webhook сервер
+    start_tv_webhook()
 
     # ── Агресивне очищення — вбиваємо всі сесії ──
     logger.info("Очищення старих сесій...")
