@@ -21,7 +21,7 @@ if not TWELVE_KEY:
 # ══ TRADINGVIEW WEBHOOK ════════════════════════════════
 # Секретний токен для захисту вебхука (встанови змінну TV_WEBHOOK_SECRET)
 TV_WEBHOOK_SECRET = os.environ.get("TV_WEBHOOK_SECRET", "signal_ai_secret_2024")
-TV_WEBHOOK_PORT   = int(os.environ.get("TV_WEBHOOK_PORT", "8080"))
+TV_WEBHOOK_PORT   = int(os.environ.get("PORT", os.environ.get("TV_WEBHOOK_PORT", "8080")))
 
 # {chat_id: bool} — підписники TradingView сигналів (окремо від авто-сигналів)
 _tv_subscribers = set()
