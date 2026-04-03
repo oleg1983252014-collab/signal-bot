@@ -10,7 +10,6 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import io
-import pytz
 KYIV_TZ = pytz.timezone("Europe/Kiev")
 now = datetime.now(KYIV_TZ)
 time_str = now.strftime("%H:%M %d.%m.%Y")
