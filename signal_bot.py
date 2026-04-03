@@ -17,7 +17,7 @@ from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 # ══════════════════════════════════════════════════════
 # НАЛАШТУВАННЯ — встанови у Railway Variables
 # ══════════════════════════════════════════════════════
-BOT_TOKEN  = os.environ.get("8542231431:AAHJ-9Rwr_taqFMaBd9YBau8bVcMU38633Y")
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
 TWELVE_KEY = os.environ.get("TWELVE_KEY", "99b3ca01dbdf45ccb2f5968b16af1c82")
 
 if not BOT_TOKEN:
