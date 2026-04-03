@@ -10,7 +10,8 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import io
-KYIV_TZ = pytz.timezone("Europe/Kiev")
+from datetime import datetime, timezone, timedelta
+KYIV_TZ = timezone(timedelta(hours=3))
 now = datetime.now(KYIV_TZ)
 time_str = now.strftime("%H:%M %d.%m.%Y")
 from telebot import TeleBot
