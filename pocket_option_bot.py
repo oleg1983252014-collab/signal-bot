@@ -14,9 +14,11 @@ from telebot import TeleBot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 BOT_TOKEN  = os.environ.get("BOT_TOKEN")
-TWELVE_KEY = os.environ.get("TWELVE_KEY")
+TWELVE_KEY = os.environ.get("TWELVE_KEY", "")
 if not TWELVE_KEY:
-    TWELVE_KEY = "99b3ca01dbdf45ccb2f5968b16af1c82"  # резерв для локального запуску
+    import sys
+    print("⚠️  TWELVE_KEY не встановлено! Бот працюватиме на fallback-даних.")
+    # Не зберігаємо ключ у відкритому коді — встанови змінну середовища TWELVE_KEY
 
 # ══ TRADINGVIEW WEBHOOK ════════════════════════════════
 # Секретний токен для захисту вебхука (встанови змінну TV_WEBHOOK_SECRET)
@@ -32,16 +34,24 @@ def _load_tv_subscribers():
         if os.path.exists(TV_SUBS_FILE):
             with open(TV_SUBS_FILE) as f:
                 return set(json.load(f).get("tv_subscribers", []))
-    except: pass
+    except Exception as e:
+        print(f"[WARN] Не вдалося завантажити TV підписників: {e}")
     return set()
 
 def _save_tv_subscribers():
-    try:
-        with open(TV_SUBS_FILE, "w") as f:
-            json.dump({"tv_subscribers": list(_tv_subscribers)}, f)
-    except: pass
+    with _tv_subs_lock:
+        try:
+            with open(TV_SUBS_FILE, "w") as f:
+                json.dump({"tv_subscribers": list(_tv_subscribers)}, f)
+        except Exception as e:
+            print(f"[WARN] Не вдалося зберегти TV підписників: {e}")
 
 _tv_subscribers = _load_tv_subscribers()
+
+# ══ THREADING LOCKS ═══════════════════════════════════
+_tv_subs_lock   = threading.Lock()
+_subs_lock      = threading.Lock()
+_last_sig_lock  = threading.Lock()
 
 # ══ АВТО-СИГНАЛИ: список підписників ══════════════════
 SUBSCRIBERS_FILE = "subscribers.json"   # зберігаємо підписників між рестартами
@@ -55,15 +65,18 @@ def _load_subscribers():
             with open(SUBSCRIBERS_FILE) as f:
                 data = json.load(f)
                 return set(data.get("subscribers", [])), data.get("auto_tf", {})
-    except: pass
+    except Exception as e:
+        print(f"[WARN] Не вдалося завантажити підписників: {e}")
     return set(), {}
 
 def _save_subscribers():
-    try:
-        with open(SUBSCRIBERS_FILE, "w") as f:
-            json.dump({"subscribers": list(_subscribers),
-                       "auto_tf": {str(k): v for k,v in _auto_tf.items()}}, f)
-    except: pass
+    with _subs_lock:
+        try:
+            with open(SUBSCRIBERS_FILE, "w") as f:
+                json.dump({"subscribers": list(_subscribers),
+                           "auto_tf": {str(k): v for k,v in _auto_tf.items()}}, f)
+        except Exception as e:
+            print(f"[WARN] Не вдалося зберегти підписників: {e}")
 
 _subscribers, _auto_tf = _load_subscribers()
 
@@ -80,8 +93,8 @@ def load_journal():
         if os.path.exists(JOURNAL_FILE):
             with open(JOURNAL_FILE) as f:
                 return json.load(f)
-    except:
-        pass
+    except Exception as e:
+        print(f"[WARN] Не вдалося завантажити журнал: {e}")
     return {}
 
 def save_journal(d):
@@ -89,8 +102,8 @@ def save_journal(d):
         try:
             with open(JOURNAL_FILE, "w") as f:
                 json.dump(d, f, ensure_ascii=False, indent=2)
-        except:
-            pass
+        except Exception as e:
+            print(f"[WARN] Не вдалося зберегти журнал: {e}")
 
 all_journal = load_journal()
 
@@ -254,7 +267,9 @@ def reversal_monitor():
     while True:
         try:
             now = time.time()
-            for k, last in list(_last_signals.items()):
+            with _last_sig_lock:
+                snapshot = list(_last_signals.items())
+            for k, last in snapshot:
                 cid   = int(k)
                 pair  = last.get("pair")
                 tf    = last.get("tf")
@@ -264,7 +279,8 @@ def reversal_monitor():
                     continue
                 # Видаляємо старі записи (> 2 години)
                 if now - sent_at > 7200:
-                    _last_signals.pop(k, None)
+                    with _last_sig_lock:
+                        _last_signals.pop(k, None)
                     continue
 
                 # Перевіряємо не частіше ніж раз на CHECK_INTERVAL
@@ -295,11 +311,12 @@ def reversal_monitor():
                     )
                     try:
                         bot.send_message(cid, msg, parse_mode="Markdown")
-                    except:
-                        pass
-                    _last_signals.pop(k, None)
-        except:
-            pass
+                    except Exception as e:
+                        print(f"[REVERSAL] Помилка надсилання cid={cid}: {e}")
+                    with _last_sig_lock:
+                        _last_signals.pop(k, None)
+        except Exception as e:
+            print(f"[REVERSAL MONITOR ERR] {e}")
         time.sleep(120)  # основний цикл — кожні 2 хв
 
 # ══ АВТО-СИГНАЛИ ══════════════════════════════════════
@@ -317,14 +334,15 @@ def auto_signal_loop():
                 sig = generate_signal(p["name"], tf)
                 if sig and sig["acc"] >= 85 and not sig.get("blocked"):
                     results.append((p["name"], tf, sig))
-            except:
-                pass
+            except Exception as e:
+                print(f"[AUTO SIGNAL] Помилка {p['name']}: {e}")
         results.sort(key=lambda x: -x[2]["acc"])
         best = results[:2]  # максимум 2 сигнали
         if not best:
             continue
         for cid in list(_subscribers):
             try:
+                tf_for_user = _auto_tf.get(str(cid), AUTO_DEFAULT_TF)
                 bot.send_message(cid, "⚡ *Авто-сигнали SIGNAL AI*", parse_mode="Markdown")
                 for pair, tf, sig in best:
                     txt = format_signal(pair, tf, sig)
@@ -332,14 +350,15 @@ def auto_signal_loop():
                     full_txt = txt + mm
                     bot.send_message(cid, full_txt, parse_mode="Markdown",
                                      reply_markup=result_kb(pair, tf))
-                    _last_signals[str(cid)] = {
-                        "pair": pair, "tf": tf,
-                        "is_buy": sig["is_buy"],
-                        "sent_at": time.time()
-                    }
+                    with _last_sig_lock:
+                        _last_signals[str(cid)] = {
+                            "pair": pair, "tf": tf,
+                            "is_buy": sig["is_buy"],
+                            "sent_at": time.time()
+                        }
                     time.sleep(0.5)
-            except:
-                pass
+            except Exception as e:
+                print(f"[AUTO SIGNAL] Помилка надсилання cid={cid}: {e}")
 TWELVE_URL = "https://api.twelvedata.com"
 STATS_FILE = "stats.json"
 
@@ -401,13 +420,15 @@ def load_stats():
     try:
         if os.path.exists(STATS_FILE):
             with open(STATS_FILE) as f: return json.load(f)
-    except: pass
+    except Exception as e:
+        print(f"[WARN] Не вдалося завантажити статистику: {e}")
     return {}
 def save_stats(d):
     with _lock:
         try:
             with open(STATS_FILE,"w") as f: json.dump(d,f)
-        except: pass
+        except Exception as e:
+            print(f"[WARN] Не вдалося зберегти статистику: {e}")
 all_stats=load_stats()
 
 # ══ RATE LIMITING ═════════════════════════════════════
@@ -631,7 +652,9 @@ def get_candles(symbol,tf,count=100):
     try:
         url=f"{TWELVE_URL}/time_series?symbol={symbol}&interval={interval}&outputsize={count}&apikey={TWELVE_KEY}&format=JSON"
         r=requests.get(url,timeout=12); d=r.json()
-        if d.get("status")=="error" or not d.get("values"): return [],[],[],[]
+        if d.get("status")=="error" or not d.get("values"):
+            print(f"[API] Помилка TwelveData для {symbol}/{interval}: {d.get('message','немає даних')}")
+            return [],[],[],[]
         vals=list(reversed(d["values"]))
         c=[float(v["close"]) for v in vals]
         h=[float(v["high"]) for v in vals]
@@ -640,7 +663,9 @@ def get_candles(symbol,tf,count=100):
         # Зберігаємо в кеш
         _candle_cache[cache_key] = (time.time(), c, h, l, o)
         return c,h,l,o
-    except: return [],[],[],[]
+    except Exception as e:
+        print(f"[API] get_candles помилка {symbol}/{tf}: {e}")
+        return [],[],[],[]
 
 def get_price(symbol,fb):
     try:
@@ -1093,8 +1118,10 @@ def format_signal(pair,tf,d):
         data_warn = "\n🟠 _Forex 1-5хв: дані з 15хв затримкою. Рекомендовано 15хв+ таймфрейм._\n"
     elif penalty >= 5:
         data_warn = "\n🟡 _Дані з невеликою затримкою. Підтвердіть візуально._\n"
-    if d.get("blocked") and reasons:
-        block_warn = "\n⛔ *НЕ ТОРГУВАТИ*\n" + "\n".join(f"• {r}" for r in reasons) + "\n"
+    # FIX: використовуємо d.get("block_reasons") замість невизначеної 'reasons'
+    block_reasons = d.get("block_reasons", [])
+    if d.get("blocked") and block_reasons:
+        block_warn = "\n⛔ *НЕ ТОРГУВАТИ*\n" + "\n".join(f"• {r}" for r in block_reasons) + "\n"
     elif d.get("blocked"):
         block_warn = "\n⛔ *СИГНАЛ ЗАБЛОКОВАНИЙ — НЕ ТОРГУВАТИ*\n"
     else:
@@ -1251,7 +1278,7 @@ def start_kb():
         KeyboardButton("🔍 Сканер"),  KeyboardButton("📊 Статистика"),
         KeyboardButton("🕐 Сесії"),   KeyboardButton("🏠 Меню"),
         KeyboardButton("🔔 Авто-сигнали"), KeyboardButton("📓 Журнал"),
-        KeyboardButton("📡 TV Сигнали"),
+        KeyboardButton("📡 TV Сигнали"),   KeyboardButton("📋 Pine Script"),
     )
     return kb
 
@@ -1268,6 +1295,7 @@ _REPLY_MAP = {
     "🔔 АВТО-СИГНАЛИ":    "auto_signals",
     "📓 ЖУРНАЛ":           "journal",
     "📡 TV СИГНАЛИ":       "tv_subscribe",
+    "📋 PINE SCRIPT":      "pine_script",
 }
 
 def send_main(cid,mid=None):
@@ -1283,6 +1311,8 @@ def send_main(cid,mid=None):
          "🎯 Точність: ~82-94%\n\n"
          "💡 *Просто напиши назву пари:*\n"
          "`EURUSD` • `chfjpy` • `btc` • `AAPL`\n\n"
+         "📡 /tv — TradingView сигнали\n"
+         "📋 /pine — Pine Script для TV\n\n"
          "╚══ Або оберіть категорію ══╝")
     if mid:
         try: bot.edit_message_text(txt,cid,mid,parse_mode="Markdown",reply_markup=main_kb()); return
@@ -1351,11 +1381,12 @@ def do_signal(cid,mid,pair,tf):
 
     txt = format_signal(pair,tf,sig)
     # Зберігаємо сигнал для алерту розвороту та журналу
-    _last_signals[str(cid)] = {
-        "pair": pair, "tf": tf,
-        "is_buy": sig["is_buy"],
-        "sent_at": time.time()
-    }
+    with _last_sig_lock:
+        _last_signals[str(cid)] = {
+            "pair": pair, "tf": tf,
+            "is_buy": sig["is_buy"],
+            "sent_at": time.time()
+        }
     add_journal_entry(cid, pair, tf, sig["is_buy"], sig["acc"], sig["live"])
     try:
         bot.delete_message(cid, mid)
@@ -1471,19 +1502,76 @@ def cmd_subscribe(msg):
             "📌 Щоб вимкнути — надішли /auto знову.",
             parse_mode="Markdown")
 
+def _send_pine_script(cid):
+    """Надсилає готовий Pine Script для TradingView з вебхуком"""
+    wh_url = os.environ.get("WEBHOOK_PUBLIC_URL", f"http://YOUR_SERVER:{TV_WEBHOOK_PORT}") + "/tv_webhook"
+    pine = (
+        '//@version=5\n'
+        'strategy("SIGNAL AI Webhook", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=5)\n\n'
+        '// ══ Налаштування ══\n'
+        'fast_len  = input.int(9,  "EMA Fast")\n'
+        'slow_len  = input.int(21, "EMA Slow")\n'
+        'rsi_len   = input.int(14, "RSI Period")\n'
+        'rsi_ob    = input.int(70, "RSI Overbought")\n'
+        'rsi_os    = input.int(30, "RSI Oversold")\n\n'
+        '// ══ Індикатори ══\n'
+        'ema_fast = ta.ema(close, fast_len)\n'
+        'ema_slow = ta.ema(close, slow_len)\n'
+        'rsi      = ta.rsi(close, rsi_len)\n'
+        '[macd_line, signal_line, hist] = ta.macd(close, 12, 26, 9)\n\n'
+        '// ══ Умови входу ══\n'
+        'buy_signal  = ta.crossover(ema_fast, ema_slow) and rsi < rsi_ob and macd_line > signal_line\n'
+        'sell_signal = ta.crossunder(ema_fast, ema_slow) and rsi > rsi_os and macd_line < signal_line\n\n'
+        'if buy_signal\n'
+        '    strategy.entry("BUY", strategy.long)\n'
+        'if sell_signal\n'
+        '    strategy.entry("SELL", strategy.short)\n\n'
+        '// ══ Алерти для Webhook ══\n'
+        'alertcondition(buy_signal,  "BUY Signal",  "BUY")\n'
+        'alertcondition(sell_signal, "SELL Signal", "SELL")\n\n'
+        'plot(ema_fast, "EMA Fast", color.new(color.blue, 0),   2)\n'
+        'plot(ema_slow, "EMA Slow", color.new(color.orange, 0), 2)\n'
+    )
+    bot.send_message(
+        cid,
+        f"📋 *Pine Script для TradingView*\n\n"
+        f"Копіюй код нижче у Pine Editor:\n\n"
+        f"```\n{pine}```\n\n"
+        f"*Як налаштувати алерт:*\n"
+        f"1️⃣ Додай індикатор на графік\n"
+        f"2️⃣ ПКМ на графіку → *Add Alert*\n"
+        f"3️⃣ Condition: *BUY Signal* або *SELL Signal*\n"
+        f"4️⃣ Notifications → ✅ Webhook URL:\n"
+        f"`{wh_url}`\n\n"
+        f"5️⃣ Message (JSON):\n"
+        "```\n"
+        "{\n"
+        f'  "secret": "{TV_WEBHOOK_SECRET}",\n'
+        '  "pair": "{{ticker}}",\n'
+        '  "tf": "{{interval}}",\n'
+        '  "direction": "{{strategy.order.action}}",\n'
+        '  "price": "{{close}}",\n'
+        '  "indicator": "EMA Cross + RSI + MACD"\n'
+        "}\n"
+        "```\n\n"
+        "✅ Готово! Сигнали надходитимуть у Telegram автоматично.",
+        parse_mode="Markdown"
+    )
+
 @bot.message_handler(commands=["tv","tvwebhook","tradingview"])
 def cmd_tv_info(msg):
     """Інформація про TradingView Webhook та управління підпискою"""
     cid = msg.chat.id
     status = "🟢 УВІМКНЕНО" if cid in _tv_subscribers else "🔴 ВИМКНЕНО"
     auto_status = "🟢 УВІМКНЕНО" if cid in _subscribers else "🔴 ВИМКНЕНО"
-    wh_url = f"http://YOUR_SERVER:{TV_WEBHOOK_PORT}/tv_webhook"
+    wh_url = os.environ.get("WEBHOOK_PUBLIC_URL", f"http://YOUR_SERVER:{TV_WEBHOOK_PORT}") + "/tv_webhook"
 
     kb = InlineKeyboardMarkup(row_width=1)
     if cid in _tv_subscribers:
         kb.add(InlineKeyboardButton("🔕 Відписатись від TV сигналів", callback_data="tv_subscribe"))
     else:
         kb.add(InlineKeyboardButton("📡 Підписатись на TV сигнали", callback_data="tv_subscribe"))
+    kb.add(InlineKeyboardButton("📋 Pine Script стратегія", callback_data="tv_pine"))
     kb.add(InlineKeyboardButton("🏠 Меню", callback_data="main"))
 
     bot.send_message(
@@ -1498,10 +1586,11 @@ def cmd_tv_info(msg):
         "{\n"
         f'  "secret": "{TV_WEBHOOK_SECRET}",\n'
         '  "pair": "{{ticker}}",\n'
-        '  "tf": "5",\n'
+        '  "tf": "{{interval}}",\n'
         '  "direction": "{{strategy.order.action}}",\n'
         '  "price": "{{close}}",\n'
         '  "indicator": "Назва стратегії",\n'
+        '  "strategy": "{{strategy.order.id}}",\n'
         '  "acc": "88"\n'
         "}\n"
         "```\n\n"
@@ -1510,10 +1599,15 @@ def cmd_tv_info(msg):
         "*Підтримувані формати pair:*\n"
         "`EURUSD` `EUR/USD` `OANDA:EURUSD`\n"
         "`FX:GBPUSD` `BINANCE:BTCUSDT`\n\n"
-        "💡 _Замість `YOUR_SERVER` вкажи реальну IP/домен сервера_",
+        "💡 Встанови змінну `WEBHOOK_PUBLIC_URL` з реальною адресою сервера\n\n"
+        "📋 Натисни *Pine Script стратегія* щоб отримати готовий код для TradingView",
         parse_mode="Markdown",
         reply_markup=kb
     )
+
+@bot.message_handler(commands=["pine","pinescript"])
+def cmd_pine(msg):
+    _send_pine_script(msg.chat.id)
 
 @bot.message_handler(commands=["journal"])
 def cmd_journal(msg):
@@ -1587,13 +1681,15 @@ def cmd_text(msg):
                 bot.send_message(cid, "🔔 *Авто-сигнали увімкнено!*\nСигнали ≥85% кожні 5 хвилин.", parse_mode="Markdown")
         elif action == "tv_subscribe":
             if cid in _tv_subscribers:
-                _tv_subscribers.discard(cid)
+                with _tv_subs_lock:
+                    _tv_subscribers.discard(cid)
                 _save_tv_subscribers()
                 bot.send_message(cid, "🔕 *TradingView сигнали вимкнено*", parse_mode="Markdown")
             else:
-                _tv_subscribers.add(cid)
+                with _tv_subs_lock:
+                    _tv_subscribers.add(cid)
                 _save_tv_subscribers()
-                wh_url = f"http://YOUR_SERVER:{TV_WEBHOOK_PORT}/tv_webhook"
+                wh_url = os.environ.get("WEBHOOK_PUBLIC_URL", f"http://YOUR_SERVER:{TV_WEBHOOK_PORT}") + "/tv_webhook"
                 bot.send_message(
                     cid,
                     "📡 *TradingView сигнали увімкнено!*\n\n"
@@ -1604,17 +1700,20 @@ def cmd_text(msg):
                     "{\n"
                     f'  "secret": "{TV_WEBHOOK_SECRET}",\n'
                     '  "pair": "{{ticker}}",\n'
-                    '  "tf": "5",\n'
+                    '  "tf": "{{interval}}",\n'
                     '  "direction": "{{strategy.order.action}}",\n'
                     '  "price": "{{close}}",\n'
                     '  "indicator": "MyStrategy",\n'
                     '  "acc": "88"\n'
                     "}\n"
-                    "```",
+                    "```\n\n"
+                    "📋 /pine — готовий Pine Script код",
                     parse_mode="Markdown"
                 )
         elif action == "journal":
             cmd_journal(msg)
+        elif action == "pine_script":
+            _send_pine_script(cid)
         return
 
     pair = normalize_pair(text)
@@ -1688,16 +1787,18 @@ def handle_cb(call):
                 cid,mid,parse_mode="Markdown",reply_markup=main_kb())
         elif d=="tv_subscribe":
             if cid in _tv_subscribers:
-                _tv_subscribers.discard(cid)
+                with _tv_subs_lock:
+                    _tv_subscribers.discard(cid)
                 _save_tv_subscribers()
                 bot.edit_message_text(
                     "🔕 *TradingView сигнали вимкнено*\n\n"
                     "Ви більше не отримуватимете алерти з TradingView.",
                     cid, mid, parse_mode="Markdown", reply_markup=main_kb())
             else:
-                _tv_subscribers.add(cid)
+                with _tv_subs_lock:
+                    _tv_subscribers.add(cid)
                 _save_tv_subscribers()
-                wh_url = f"http://YOUR_SERVER:{TV_WEBHOOK_PORT}/tv_webhook"
+                wh_url = os.environ.get("WEBHOOK_PUBLIC_URL", f"http://YOUR_SERVER:{TV_WEBHOOK_PORT}") + "/tv_webhook"
                 bot.edit_message_text(
                     "📡 *TradingView сигнали увімкнено!*\n\n"
                     "Ви будете отримувати сигнали напряму з TradingView.\n\n"
@@ -1709,15 +1810,18 @@ def handle_cb(call):
                     "{\n"
                     f'  "secret": "{TV_WEBHOOK_SECRET}",\n'
                     '  "pair": "{{ticker}}",\n'
-                    '  "tf": "5",\n'
+                    '  "tf": "{{interval}}",\n'
                     '  "direction": "{{strategy.order.action}}",\n'
                     '  "price": "{{close}}",\n'
-                    '  "indicator": "MyStrategy",\n'
+                    '  "indicator": "Назва стратегії",\n'
                     '  "acc": "88"\n'
                     "}\n"
                     "```\n\n"
+                    "📋 /pine — готовий Pine Script код\n"
                     "✅ Готово! Сигнали надходитимуть автоматично.",
                     cid, mid, parse_mode="Markdown", reply_markup=main_kb())
+        elif d=="tv_pine":
+            _send_pine_script(cid)
         elif d.startswith("pair_"):
             pair=d[5:]
             if pair not in ALL_PAIRS:
@@ -1778,6 +1882,8 @@ def format_tv_signal(data: dict) -> str:
     price     = data.get("price", "?")
     indicator = data.get("indicator", "TradingView")
     acc_raw   = data.get("acc", None)
+    strategy  = data.get("strategy", "")
+    comment   = data.get("comment", "")
 
     is_buy  = direction in ("BUY", "LONG", "UP", "ВВЕРХ", "1")
     arrow   = "⬆️" if is_buy else "⬇️"
@@ -1790,17 +1896,29 @@ def format_tv_signal(data: dict) -> str:
     now_dt  = datetime.now(timezone.utc) + timedelta(hours=2)
     tf_hold = {"1":2,"3":4,"5":8,"15":20,"30":35,"60":70,"240":260}
     try:
-        exp = (now_dt + timedelta(minutes=tf_hold.get(int(tf), 5))).strftime("%H:%M")
+        exp = (now_dt + timedelta(minutes=tf_hold.get(str(tf), 5))).strftime("%H:%M")
     except:
         exp = "—"
 
     acc_line = f"\n🎯 Точність: *{acc_raw}%*" if acc_raw else ""
+    strategy_line = f"\n📋 Стратегія: _{strategy}_" if strategy else ""
+    comment_line  = f"\n💬 _{comment}_" if comment else ""
     _, _, sess_mult = get_session()
     sess_name, _, _ = get_session()
 
     # Фільтр новин
     has_news, news_warn = check_news_filter(pair)
     news_line = f"\n{news_warn}\n" if has_news else ""
+
+    # Money management якщо є acc
+    mm_line = ""
+    if acc_raw:
+        try:
+            pct, amount, label = calc_money_management(int(acc_raw))
+            if pct > 0:
+                mm_line = f"\n💰 MM: {label} | Ставка *{pct}%* (~${amount})\n"
+        except:
+            pass
 
     lines = [
         "╔══ 📡 *TRADINGVIEW СИГНАЛ* ══╗",
@@ -1814,6 +1932,9 @@ def format_tv_signal(data: dict) -> str:
         f"📊 Індикатор: _{indicator}_",
         f"💰 Ціна входу: `{price}`",
         acc_line,
+        strategy_line,
+        comment_line,
+        mm_line,
         news_line,
         "└─────────────────────────┘",
         "⚠️ _Не є фінансовою порадою_",
@@ -1831,7 +1952,12 @@ def start_tv_webhook():
 
     @app.route("/health", methods=["GET"])
     def health():
-        return jsonify({"status": "ok", "tv_subscribers": len(_tv_subscribers)}), 200
+        return jsonify({
+            "status": "ok",
+            "tv_subscribers": len(_tv_subscribers),
+            "auto_subscribers": len(_subscribers),
+            "webhook_url": os.environ.get("WEBHOOK_PUBLIC_URL", f"http://YOUR_SERVER:{TV_WEBHOOK_PORT}") + "/tv_webhook"
+        }), 200
 
     @app.route("/tv_webhook", methods=["POST"])
     def tv_webhook():
@@ -1843,7 +1969,7 @@ def start_tv_webhook():
         # Перевірка секрету
         incoming_secret = data.get("secret", "")
         if not hmac.compare_digest(str(incoming_secret), str(TV_WEBHOOK_SECRET)):
-            print(f"[TV Webhook] ❌ Невірний secret: {incoming_secret!r}")
+            print(f"[TV Webhook] ❌ Невірний secret від {flask_request.remote_addr}")
             return jsonify({"error": "unauthorized"}), 403
 
         pair_raw  = data.get("pair", "").strip()
@@ -1856,7 +1982,6 @@ def start_tv_webhook():
         # Нормалізуємо пару (підтримка OANDA:EURUSD, FX:GBPUSD, BINANCE:BTCUSDT тощо)
         pair = normalize_pair(pair_raw)
         if not pair:
-            # fallback — просто uppercase + slash нормалізація
             pair = pair_raw.upper().replace("_", "/")
             if ":" in pair:
                 pair = pair.split(":")[-1]
@@ -1864,7 +1989,6 @@ def start_tv_webhook():
         print(f"[TV Webhook] ✅ Отримано: {pair_raw!r} → {pair} | {direction} | TF={tf}")
 
         msg = format_tv_signal(data)
-        # Якщо пара є в нашому списку — додатково генеруємо внутрішній сигнал
         extra_msg = None
         sig = None
         if pair in ALL_PAIRS or (pair + " OTC") in ALL_PAIRS:
@@ -1888,9 +2012,7 @@ def start_tv_webhook():
         sent = 0
         for cid in list(_tv_subscribers):
             try:
-                bot.send_message(cid, full_msg, parse_mode="Markdown",
-                                 reply_markup=kb)
-                # Записуємо в журнал
+                bot.send_message(cid, full_msg, parse_mode="Markdown", reply_markup=kb)
                 is_buy_tv = direction in ("BUY", "LONG", "UP", "ВВЕРХ", "1")
                 price_tv  = data.get("price", sig["live"] if sig else 0)
                 acc_tv    = int(data.get("acc", sig["acc"] if sig else 80) or 80)
@@ -1900,26 +2022,29 @@ def start_tv_webhook():
             except Exception as e:
                 print(f"[TV Webhook] send error cid={cid}: {e}")
 
-        # Також розсилаємо звичайним авто-підписникам якщо сигнал сильний
+        # Розсилаємо авто-підписникам якщо сигнал сильний (≥85%)
         acc_val = int(data.get("acc", 0) or 0)
         if acc_val >= 85:
-            for cid in list(_subscribers) - _tv_subscribers:
+            extra_cids = list(_subscribers - _tv_subscribers)
+            for cid in extra_cids:
                 try:
                     bot.send_message(cid, f"📡 *TradingView алерт:*\n" + full_msg,
                                      parse_mode="Markdown")
                     time.sleep(0.05)
-                except: pass
+                except Exception as e:
+                    print(f"[TV Webhook] auto-sub send error cid={cid}: {e}")
 
         print(f"[TV Webhook] Надіслано {sent} підписникам")
-        return jsonify({"ok": True, "sent": sent}), 200
+        return jsonify({"ok": True, "sent": sent, "pair": pair, "direction": direction}), 200
 
     def run():
         app.run(host="0.0.0.0", port=TV_WEBHOOK_PORT, debug=False, use_reloader=False)
 
     t = threading.Thread(target=run, daemon=True)
     t.start()
+    pub_url = os.environ.get("WEBHOOK_PUBLIC_URL", f"http://0.0.0.0:{TV_WEBHOOK_PORT}")
     print(f"✅ TradingView Webhook сервер запущено на порту {TV_WEBHOOK_PORT}")
-    print(f"   URL: http://0.0.0.0:{TV_WEBHOOK_PORT}/tv_webhook")
+    print(f"   URL: {pub_url}/tv_webhook")
     print(f"   Secret: {TV_WEBHOOK_SECRET}")
 
 
