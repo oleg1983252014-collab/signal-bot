@@ -23,7 +23,7 @@ TWELVE_KEY = os.environ.get("TWELVE_KEY", "99b3ca01dbdf45ccb2f5968b16af1c82")
 if not BOT_TOKEN:
     raise ValueError("❌ Встанови змінну BOT_TOKEN у Railway!")
 
-bot = TeleBot(7553475512)
+bot = TeleBot(BOT_TOKEN)   # ← передається рядковий токен зі змінної
 
 TWELVE_URL = "https://api.twelvedata.com"
 
