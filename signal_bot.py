@@ -10,7 +10,10 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import io
-from datetime import datetime, timezone, timedelta
+import pytz
+KYIV_TZ = pytz.timezone("Europe/Kiev")
+now = datetime.now(KYIV_TZ)
+time_str = now.strftime("%H:%M %d.%m.%Y")
 from telebot import TeleBot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 
